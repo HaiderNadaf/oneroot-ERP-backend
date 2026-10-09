@@ -42,12 +42,32 @@ class AllExceptionsFilter implements ExceptionFilter {
   }
 }
 
+/**
+ * CORS_ORIGIN is a comma-separated list of allowed frontend addresses. Trailing slashes and case
+ * are ignored, and `*` works as a wildcard (e.g. https://*.vercel.app for preview deployments).
+ */
+function corsOrigin(setting = 'http://localhost:3000') {
+  const clean = (o: string) => o.trim().replace(/\/+$/, '').toLowerCase();
+  const rules = setting
+    .split(',')
+    .map(clean)
+    .filter(Boolean)
+    .map((o) => new RegExp('^' + o.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]+') + '$'));
+  return (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+    // Requests without an Origin header (curl, server-to-server, health checks) are allowed
+    if (!origin) return cb(null, true);
+    const ok = rules.some((r) => r.test(clean(origin)));
+    if (!ok) Logger.warn(`Blocked by CORS: ${origin} (allowed: ${setting})`, 'CORS');
+    cb(null, ok);
+  };
+}
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.setGlobalPrefix('api');
   // gzip JSON responses (lists shrink 70-80%)
   app.use(compression());
-  app.enableCors({ origin: (process.env.CORS_ORIGIN ?? 'http://localhost:3000').split(','), credentials: true });
+  app.enableCors({ origin: corsOrigin(process.env.CORS_ORIGIN), credentials: true });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalFilters(new AllExceptionsFilter());
 

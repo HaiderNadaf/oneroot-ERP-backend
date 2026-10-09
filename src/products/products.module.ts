@@ -1,0 +1,323 @@
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Injectable,
+  Module,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { PartialType } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
+import {
+  IsBoolean,
+  IsDateString,
+  IsEnum,
+  IsNumber,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+  ValidateNested,
+} from 'class-validator';
+import { AuditService } from '../audit/audit.service.js';
+import { CurrentUser, Roles, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
+import { nextSku, peekSku, skuPrefix } from '../common/sku.js';
+import { paged, paging, startOfDay, type Paging } from '../common/utils.js';
+import type { Prisma } from '../generated/prisma/client.js';
+import { ProductType } from '../generated/prisma/enums.js';
+import { StockService } from '../inventory/stock.service.js';
+import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
+
+class OpeningStockDto {
+  @Type(() => Number) @IsNumber() @Min(0.001) quantity: number;
+  @IsOptional() @IsString() batchNo?: string;
+  @IsOptional() @IsDateString() mfgDate?: string;
+  @IsOptional() @IsDateString() expiryDate?: string;
+  @IsOptional() @Type(() => Number) @IsNumber() unitCost?: number;
+}
+
+class CreateProductDto {
+  @IsOptional() @IsString() sku?: string;
+  @IsOptional() @IsString() barcode?: string;
+  @IsString() name: string;
+  @IsOptional() @IsEnum(ProductType) type?: ProductType;
+  @IsOptional() @IsString() categoryId?: string;
+  @IsOptional() @IsString() brand?: string;
+  @IsOptional() @IsString() manufacturer?: string;
+  @IsOptional() @IsString() technicalName?: string;
+  @IsOptional() @IsString() description?: string;
+  @IsOptional() @IsString() hsnCode?: string;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) @Max(100) gstRate?: number;
+  @IsOptional() @IsString() unit?: string;
+  @IsOptional() @IsString() packSize?: string;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) mrp?: number;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) salePrice?: number;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) purchasePrice?: number;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) reorderLevel?: number;
+  @IsOptional() @IsBoolean() trackBatch?: boolean;
+  @IsOptional() @IsBoolean() isActive?: boolean;
+  @IsOptional() @ValidateNested() @Type(() => OpeningStockDto) openingStock?: OpeningStockDto;
+}
+
+class UpdateProductDto extends PartialType(CreateProductDto) {}
+
+@Injectable()
+export class ProductsService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stock: StockService,
+    private readonly audit: AuditService,
+  ) {}
+
+  async list(
+    q: Paging & {
+      search?: string;
+      type?: string;
+      categoryId?: string;
+      status?: string;
+      stock?: string;
+      sort?: string;
+      /** "true" adds sellable (unexpired) qty and the next expiry date — used by POS cards */
+      withExpiry?: string;
+    },
+    branchId: string | null = null,
+  ) {
+    const p = paging(q);
+    const where: Prisma.ProductWhereInput = {
+      type: (q.type as ProductType) || undefined,
+      categoryId: q.categoryId || undefined,
+      isActive: q.status === 'inactive' ? false : q.status === 'all' ? undefined : true,
+    };
+    // Stock filter: in stock / at or below reorder level / out of stock
+    if (branchId) {
+      // Stock in the selected branch only
+      const inBranch = { branchId, quantity: { gt: 0 } };
+      if (q.stock === 'in') where.batches = { some: inBranch };
+      if (q.stock === 'out') where.batches = { none: inBranch };
+      if (q.stock === 'low') {
+        const low = await this.prisma.$queryRaw<{ id: string }[]>`
+          SELECT p.id FROM "Product" p LEFT JOIN "Batch" b ON b."productId" = p.id AND b."branchId" = ${branchId}
+          WHERE p."reorderLevel" > 0 GROUP BY p.id HAVING COALESCE(SUM(b.quantity), 0) <= p."reorderLevel"`;
+        where.id = { in: low.map((r) => r.id) };
+      }
+    } else {
+      if (q.stock === 'in') where.stock = { gt: 0 };
+      if (q.stock === 'out') where.stock = { lte: 0 };
+      if (q.stock === 'low') {
+        where.reorderLevel = { gt: 0 };
+        where.stock = { lte: this.prisma.product.fields.reorderLevel };
+      }
+    }
+    const orderBy: Prisma.ProductOrderByWithRelationInput =
+      {
+        stock_asc: { stock: 'asc' as const },
+        stock_desc: { stock: 'desc' as const },
+        price_asc: { salePrice: 'asc' as const },
+        price_desc: { salePrice: 'desc' as const },
+        newest: { createdAt: 'desc' as const },
+        sku: { sku: 'asc' as const },
+      }[q.sort ?? ''] ?? { name: 'asc' };
+    if (q.search) {
+      where.OR = [
+        { name: { contains: q.search, mode: 'insensitive' } },
+        { sku: { contains: q.search, mode: 'insensitive' } },
+        { barcode: q.search },
+        { brand: { contains: q.search, mode: 'insensitive' } },
+        { technicalName: { contains: q.search, mode: 'insensitive' } },
+      ];
+    }
+    const [items, total] = await Promise.all([
+      this.prisma.product.findMany({
+        where,
+        include: { category: { select: { id: true, name: true } } },
+        orderBy: [orderBy, { name: 'asc' }],
+        skip: p.skip,
+        take: p.take,
+      }),
+      this.prisma.product.count({ where }),
+    ]);
+    const expiry = q.withExpiry === 'true' ? await this.expiryInfo(items.map((i) => i.id), branchId) : null;
+    const withExp = <T extends { id: string }>(i: T) =>
+      expiry ? { ...i, sellable: expiry.get(i.id)?.sellable ?? 0, nextExpiry: expiry.get(i.id)?.nextExpiry ?? null } : i;
+    if (!branchId) return paged(items.map(withExp), total, p);
+    // With a branch selected, `stock` is that branch's stock; `totalStock` is all branches
+    const sums = await this.branchSums(items.map((i) => i.id), branchId);
+    return paged(
+      items.map((i) => withExp({ ...i, totalStock: i.stock, stock: sums.get(i.id) ?? 0 })),
+      total,
+      p,
+    );
+  }
+
+  /** Unexpired quantity and the earliest upcoming expiry per product (in a branch, or everywhere) */
+  private async expiryInfo(productIds: string[], branchId: string | null) {
+    if (!productIds.length) return new Map<string, { sellable: number; nextExpiry: Date | null }>();
+    const today = startOfDay(new Date());
+    const rows = await this.prisma.batch.groupBy({
+      by: ['productId'],
+      where: {
+        productId: { in: productIds },
+        branchId: branchId ?? undefined,
+        quantity: { gt: 0 },
+        OR: [{ expiryDate: null }, { expiryDate: { gte: today } }],
+      },
+      _sum: { quantity: true },
+      _min: { expiryDate: true },
+    });
+    return new Map(rows.map((r) => [r.productId, { sellable: Number(r._sum.quantity ?? 0), nextExpiry: r._min.expiryDate }]));
+  }
+
+  private async branchSums(productIds: string[], branchId: string) {
+    if (!productIds.length) return new Map<string, number>();
+    const rows = await this.prisma.batch.groupBy({
+      by: ['productId'],
+      where: { productId: { in: productIds }, branchId },
+      _sum: { quantity: true },
+    });
+    return new Map(rows.map((r) => [r.productId, Number(r._sum.quantity ?? 0)]));
+  }
+
+  /** Product with its batches (selected branch only) and a stock breakdown per branch */
+  async get(id: string, branchId: string | null = null) {
+    const [product, perBranch] = await Promise.all([
+      this.prisma.product.findUniqueOrThrow({
+        where: { id },
+        include: {
+          category: true,
+          batches: {
+            where: { quantity: { gt: 0 }, branchId: branchId ?? undefined },
+            include: { branch: { select: { id: true, code: true, name: true } } },
+            orderBy: { expiryDate: { sort: 'asc', nulls: 'last' } },
+          },
+        },
+      }),
+      this.prisma.$queryRaw<{ branchId: string; code: string; name: string; quantity: string }[]>`
+        SELECT br.id AS "branchId", br.code, br.name, COALESCE(SUM(b.quantity), 0) AS quantity
+        FROM "Branch" br LEFT JOIN "Batch" b ON b."branchId" = br.id AND b."productId" = ${id}
+        WHERE br."isActive" = true GROUP BY br.id ORDER BY br.name`,
+    ]);
+    const branchStock = perBranch.map((r) => ({ ...r, quantity: Number(r.quantity) }));
+    return {
+      ...product,
+      totalStock: product.stock,
+      stock: branchId ? (branchStock.find((b) => b.branchId === branchId)?.quantity ?? 0) : product.stock,
+      branchStock,
+    };
+  }
+
+  /** SKU the next product in this category (or type) would get — for the form preview */
+  async previewSku(categoryId: string | undefined, type: string | undefined) {
+    return this.prisma.$transaction(async (tx) => {
+      const prefix = await skuPrefix(tx, categoryId, (type as ProductType) || 'OTHER');
+      return { prefix, sku: await peekSku(tx, prefix) };
+    });
+  }
+
+
+  async create(dto: CreateProductDto, user: AuthUser, branchId: string | null = null) {
+    const { openingStock, ...data } = dto;
+    return this.prisma.$transaction(async (tx) => {
+      const sku =
+        data.sku?.trim().toUpperCase() || (await nextSku(tx, await skuPrefix(tx, data.categoryId, data.type ?? 'OTHER')));
+      if (await tx.product.findUnique({ where: { sku } })) throw new BadRequestException(`SKU ${sku} already exists`);
+      const product = await tx.product.create({ data: { ...data, sku, barcode: data.barcode || undefined } });
+      if (openingStock?.quantity) {
+        await this.stock.add(tx, {
+          productId: product.id,
+          branchId: needBranch(branchId),
+          batchNo: product.trackBatch ? openingStock.batchNo : undefined,
+          mfgDate: openingStock.mfgDate ? new Date(openingStock.mfgDate) : undefined,
+          expiryDate: openingStock.expiryDate ? new Date(openingStock.expiryDate) : undefined,
+          quantity: openingStock.quantity,
+          unitCost: openingStock.unitCost ?? dto.purchasePrice ?? 0,
+          mrp: dto.mrp,
+          type: 'OPENING',
+          refType: 'OPENING',
+          note: 'Opening stock',
+          userId: user.id,
+        });
+      }
+      await this.audit.log(user.id, 'CREATE', 'Product', product.id, { name: product.name, sku }, tx);
+      return tx.product.findUniqueOrThrow({ where: { id: product.id } });
+    }, TX_OPTIONS);
+  }
+
+  async update(id: string, dto: UpdateProductDto, user: AuthUser) {
+    const { openingStock: _ignored, ...data } = dto;
+    const product = await this.prisma.product.update({
+      where: { id },
+      data: { ...data, barcode: data.barcode === '' ? null : data.barcode },
+    });
+    await this.audit.log(user.id, 'UPDATE', 'Product', id, { ...data });
+    return product;
+  }
+
+  /** Hard-delete only if the product was never transacted; otherwise deactivate */
+  async remove(id: string, user: AuthUser) {
+    const used =
+      (await this.prisma.saleItem.count({ where: { productId: id } })) +
+      (await this.prisma.purchaseItem.count({ where: { productId: id } }));
+    if (used > 0) {
+      await this.prisma.product.update({ where: { id }, data: { isActive: false } });
+      await this.audit.log(user.id, 'DEACTIVATE', 'Product', id);
+      return { deleted: false, deactivated: true };
+    }
+    await this.prisma.$transaction([
+      this.prisma.stockMovement.deleteMany({ where: { productId: id } }),
+      this.prisma.batch.deleteMany({ where: { productId: id } }),
+      this.prisma.purchaseOrderItem.deleteMany({ where: { productId: id } }),
+      this.prisma.product.delete({ where: { id } }),
+    ]);
+    await this.audit.log(user.id, 'DELETE', 'Product', id);
+    return { deleted: true };
+  }
+}
+
+@Controller('products')
+export class ProductsController {
+  constructor(private readonly products: ProductsService) {}
+
+  @Get()
+  list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
+    return this.products.list(q, branchId);
+  }
+
+  @Get('next-sku')
+  nextSku(@Query('categoryId') categoryId?: string, @Query('type') type?: string) {
+    return this.products.previewSku(categoryId || undefined, type);
+  }
+
+  @Get(':id')
+  get(@Param('id') id: string, @BranchId() branchId: string | null) {
+    return this.products.get(id, branchId);
+  }
+
+  @Post()
+  @Roles('MANAGER')
+  create(@Body() dto: CreateProductDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
+    return this.products.create(dto, user, branchId);
+  }
+
+  @Patch(':id')
+  @Roles('MANAGER')
+  update(@Param('id') id: string, @Body() dto: UpdateProductDto, @CurrentUser() user: AuthUser) {
+    return this.products.update(id, dto, user);
+  }
+
+  @Delete(':id')
+  @Roles('MANAGER')
+  remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.products.remove(id, user);
+  }
+}
+
+@Module({
+  controllers: [ProductsController],
+  providers: [ProductsService],
+})
+export class ProductsModule {}

@@ -114,6 +114,22 @@ enum PaymentDirection {
   OUT // paid to vendor
 }
 
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  INCOME
+  EXPENSE
+}
+
+enum ReminderChannel {
+  WHATSAPP
+  SMS
+  CALL
+  VISIT
+  NOTE
+}
+
 // ───────────────────────── Admin ─────────────────────────
 
 model User {
@@ -171,6 +187,7 @@ model Branch {
   debitNotes     DebitNote[]
   transfersOut   StockTransfer[] @relation("TransferFrom")
   transfersIn    StockTransfer[] @relation("TransferTo")
+  journalEntries JournalEntry[]
 }
 
 /// Stock moved from one branch to another (batch, expiry and cost travel with it)
@@ -228,6 +245,16 @@ model StoreSettings {
   currency            String   @default("INR")
   invoiceFooter       String?  @default("Thank you for your business!")
   expiryAlertDays     Int      @default(60)
+  /// Default print layout for bills: A4 invoice or thermal receipt (80 mm / 58 mm)
+  receiptFormat       String   @default("A4")
+  /// WhatsApp due-reminder text; {name} {amount} {store} {days} {phone} are filled in
+  reminderTemplate    String?
+  /// Days after the due date before a customer counts as overdue for reminders
+  reminderGraceDays   Int      @default(7)
+  /// Send WhatsApp reminders automatically every day (needs the WhatsApp Cloud API keys on the server)
+  autoReminders       Boolean  @default(false)
+  /// Refuse new credit sales to customers with overdue bills (managers can override per bill)
+  blockOverdueCredit  Boolean  @default(false)
   updatedAt           DateTime @updatedAt
 }
 
@@ -408,6 +435,10 @@ model Customer {
   landAcres      Decimal? @db.Decimal(8, 2)
   crops          String? // comma separated: "Paddy, Sugarcane"
   creditLimit    Decimal  @default(0) @db.Decimal(14, 2)
+  /// Credit period: unpaid bills fall due this many days after the sale (0 = due immediately)
+  creditDays     Int      @default(0)
+  /// Blocks further credit sales until cleared by a manager
+  creditHold     Boolean  @default(false)
   openingBalance Decimal  @default(0) @db.Decimal(14, 2)
   // Amount the customer owes us (positive = receivable)
   balance        Decimal  @default(0) @db.Decimal(14, 2)
@@ -419,8 +450,26 @@ model Customer {
   sales       Sale[]
   saleReturns SaleReturn[]
   payments    Payment[]
+  reminders   CustomerReminder[]
 
   @@index([name])
+}
+
+/// A due reminder sent to (or a collection note about) a customer
+model CustomerReminder {
+  id         String          @id @default(cuid())
+  customerId String
+  customer   Customer        @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  channel    ReminderChannel @default(WHATSAPP)
+  /// Balance due when the reminder went out
+  amount     Decimal         @db.Decimal(14, 2)
+  message    String?
+  /// true when sent by the server through the WhatsApp API rather than by a person
+  automatic  Boolean         @default(false)
+  userId     String?
+  sentAt     DateTime        @default(now())
+
+  @@index([customerId, sentAt])
 }
 
 // ───────────────────────── Purchasing ─────────────────────────
@@ -732,6 +781,8 @@ model Sale {
   paymentStatus PaymentStatus @default(PAID)
   status        DocStatus     @default(COMPLETED)
   isInterState  Boolean       @default(false)
+  /// Set by the POS when the bill was made offline, so a retried sync never bills twice
+  offlineId     String?       @unique
   notes         String?
   userId        String?
   user          User?         @relation(fields: [userId], references: [id])
@@ -848,6 +899,8 @@ model ExpenseCategory {
   id       String    @id @default(cuid())
   name     String    @unique
   expenses Expense[]
+  /// Ledger account the category's expenses post to (created on first use)
+  account  Account?
 }
 
 model Expense {
@@ -868,4 +921,70 @@ model Expense {
   branch   Branch? @relation(fields: [branchId], references: [id])
 
   @@index([expenseDate])
+}
+
+// ───────────────────────── Accounting ─────────────────────────
+
+/// Ledger account in the chart of accounts. `group` follows Tally's group names so exports map 1:1.
+model Account {
+  id                String      @id @default(cuid())
+  code              String      @unique
+  name              String      @unique
+  type              AccountType
+  /// e.g. "Sundry Debtors", "Duties & Taxes", "Indirect Expenses"
+  group             String
+  /// Fixed key used by automatic postings (CASH, BANK, DEBTORS…); such accounts cannot be deleted
+  key               String?     @unique
+  /// Expense category this account was created for
+  expenseCategoryId String?     @unique
+  expenseCategory   ExpenseCategory? @relation(fields: [expenseCategoryId], references: [id])
+  /// Opening balance at the start of the books; debit positive, credit negative
+  openingBalance    Decimal     @default(0) @db.Decimal(14, 2)
+  isActive          Boolean     @default(true)
+  createdAt         DateTime    @default(now())
+
+  lines JournalLine[]
+
+  @@index([type, group])
+}
+
+/// One balanced double-entry voucher. Automatic entries carry the source document in refType/refId.
+model JournalEntry {
+  id         String   @id @default(cuid())
+  entryNo    String   @unique
+  date       DateTime
+  narration  String?
+  /// SALE, SALE_RETURN, PURCHASE, GRN, PAYMENT, EXPENSE, DEBIT_NOTE, ADJUSTMENT, OPENING, MANUAL, REVERSAL
+  refType    String
+  refId      String?
+  refNo      String?
+  /// Entry this one reverses (sale cancelled, payment deleted…)
+  reversesId String?
+  isManual   Boolean  @default(false)
+  branchId   String?
+  branch     Branch?  @relation(fields: [branchId], references: [id])
+  userId     String?
+  createdAt  DateTime @default(now())
+
+  lines JournalLine[]
+
+  @@index([date])
+  @@index([refType, refId])
+}
+
+model JournalLine {
+  id          String       @id @default(cuid())
+  entryId     String
+  entry       JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  accountId   String
+  account     Account      @relation(fields: [accountId], references: [id])
+  debit       Decimal      @default(0) @db.Decimal(14, 2)
+  credit      Decimal      @default(0) @db.Decimal(14, 2)
+  /// Sub-ledger for Sundry Debtors / Creditors lines
+  partyType   PartyType?
+  partyId     String?
+  description String?
+
+  @@index([accountId])
+  @@index([partyType, partyId])
 }

@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsDateString, IsEnum, IsIn, IsNumber, IsOptional, IsPositive, IsString } from 'class-validator';
+import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Roles, type AuthUser, BranchId } from '../common/decorators.js';
 import { dateRange, docDate, nextDocNo, num, paged, paging, paymentStatus, round2, type Paging } from '../common/utils.js';
@@ -51,6 +52,7 @@ export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly posting: PostingService,
   ) {}
 
   private async prefix(tx: Tx) {
@@ -77,14 +79,15 @@ export class PaymentsService {
         userId: input.userId,
       },
     });
-    if (customerId) {
-      await tx.customer.update({ where: { id: customerId }, data: { balance: { decrement: input.amount } } });
-    }
+    const customer = customerId
+      ? await tx.customer.update({ where: { id: customerId }, data: { balance: { decrement: input.amount } } })
+      : null;
     if (saleId) {
       await this.applyToDoc(tx, 'sale', saleId, input.amount);
     } else if (customerId) {
       await this.allocate(tx, 'sale', { customerId, status: 'COMPLETED' }, input.amount);
     }
+    await this.posting.postPayment(tx, payment, customer?.name ?? null);
     return payment;
   }
 
@@ -107,12 +110,13 @@ export class PaymentsService {
         userId: input.userId,
       },
     });
-    await tx.vendor.update({ where: { id: vendorId }, data: { balance: { decrement: input.amount } } });
+    const vendor = await tx.vendor.update({ where: { id: vendorId }, data: { balance: { decrement: input.amount } } });
     if (purchaseId) {
       await this.applyToDoc(tx, 'purchase', purchaseId, input.amount);
     } else {
       await this.allocate(tx, 'purchase', { vendorId, status: 'COMPLETED' }, input.amount);
     }
+    await this.posting.postPayment(tx, payment, vendor.name);
     return payment;
   }
 
@@ -223,6 +227,7 @@ export class PaymentsService {
         if (p.purchaseId) await this.applyToDoc(tx, 'purchase', p.purchaseId, -amount);
         else await this.deallocate(tx, 'purchase', { vendorId: p.vendorId }, amount);
       }
+      await this.posting.reverse(tx, 'PAYMENT', id, { narration: `${p.paymentNo} deleted`, userId: user.id });
       await tx.payment.delete({ where: { id } });
       await this.audit.log(user.id, 'DELETE', 'Payment', id, { paymentNo: p.paymentNo, amount }, tx);
       return { deleted: true };

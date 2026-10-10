@@ -13,14 +13,17 @@ import {
 } from '@nestjs/common';
 import { PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsEmail, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { IsBoolean, IsEmail, IsInt, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 import { ValidateIf } from 'class-validator';
+import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
 import { num, paged, paging, round2, type Paging } from '../common/utils.js';
 import { normalizeGstin, stateFromGstin } from '../common/gst.js';
 import type { Prisma } from '../generated/prisma/client.js';
-import { PrismaService } from '../prisma/prisma.service.js';
+import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
+import { overdueOf } from './credit.js';
+import { RemindersModule } from './reminders.service.js';
 
 class CreateCustomerDto {
   @IsString() name: string;
@@ -35,6 +38,10 @@ class CreateCustomerDto {
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) landAcres?: number;
   @IsOptional() @IsString() crops?: string;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) creditLimit?: number;
+  /** Credit period in days; unpaid bills fall due after it */
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) creditDays?: number;
+  /** Stop credit sales until a manager lifts the hold */
+  @IsOptional() @IsBoolean() creditHold?: boolean;
   @IsOptional() @Type(() => Number) @IsNumber() openingBalance?: number;
   @IsOptional() @IsString() notes?: string;
   @IsOptional() @IsBoolean() isActive?: boolean;
@@ -58,6 +65,7 @@ export class CustomersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly posting: PostingService,
   ) {}
 
   async list(q: Paging & { search?: string; withDues?: string; status?: string }) {
@@ -82,7 +90,7 @@ export class CustomersService {
 
   async get(id: string) {
     const customer = await this.prisma.customer.findUniqueOrThrow({ where: { id } });
-    const [stats, recentSales] = await Promise.all([
+    const [stats, recentSales, settings, lastReminder] = await Promise.all([
       this.prisma.sale.aggregate({
         where: { customerId: id, status: 'COMPLETED' },
         _sum: { totalAmount: true },
@@ -95,11 +103,16 @@ export class CustomersService {
         take: 10,
         select: { id: true, invoiceNo: true, saleDate: true, totalAmount: true, paidAmount: true, paymentStatus: true, status: true },
       }),
+      this.prisma.storeSettings.findUnique({ where: { id: 1 } }),
+      this.prisma.customerReminder.findFirst({ where: { customerId: id }, orderBy: { sentAt: 'desc' } }),
     ]);
+    const overdue = await overdueOf(this.prisma, customer, settings?.reminderGraceDays ?? 7);
     return {
       ...customer,
       stats: { totalPurchases: stats._sum.totalAmount ?? 0, invoiceCount: stats._count, lastPurchase: stats._max.saleDate },
       recentSales,
+      overdue,
+      lastReminder,
     };
   }
 
@@ -110,25 +123,31 @@ export class CustomersService {
     if (dto.phone && (await this.prisma.customer.findUnique({ where: { phone: dto.phone } }))) {
       throw new BadRequestException('A customer with this phone number already exists');
     }
-    const customer = await this.prisma.customer.create({
-      data: { ...dto, phone: dto.phone || undefined, balance: dto.openingBalance ?? 0 },
-    });
-    await this.audit.log(user.id, 'CREATE', 'Customer', customer.id, { name: customer.name });
-    return customer;
+    return this.prisma.$transaction(async (tx) => {
+      const customer = await tx.customer.create({
+        data: { ...dto, phone: dto.phone || undefined, balance: dto.openingBalance ?? 0 },
+      });
+      await this.posting.postOpeningParty(tx, 'CUSTOMER', customer.id, customer.name, dto.openingBalance ?? 0, customer.createdAt, user.id);
+      await this.audit.log(user.id, 'CREATE', 'Customer', customer.id, { name: customer.name }, tx);
+      return customer;
+    }, TX_OPTIONS);
   }
 
   async update(id: string, dto: UpdateCustomerDto, user: AuthUser) {
     // Normalise the GSTIN and take the state from its first two digits when none was chosen
     const gstin = normalizeGstin(dto.gstin);
     dto = { ...dto, gstin: gstin as string, state: dto.state || stateFromGstin(gstin) || dto.state };
-    const existing = await this.prisma.customer.findUniqueOrThrow({ where: { id } });
-    const delta = dto.openingBalance !== undefined ? round2(dto.openingBalance - num(existing.openingBalance)) : 0;
-    const customer = await this.prisma.customer.update({
-      where: { id },
-      data: { ...dto, phone: dto.phone === '' ? null : dto.phone, balance: { increment: delta } },
-    });
-    await this.audit.log(user.id, 'UPDATE', 'Customer', id, { ...dto });
-    return customer;
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.customer.findUniqueOrThrow({ where: { id } });
+      const delta = dto.openingBalance !== undefined ? round2(dto.openingBalance - num(existing.openingBalance)) : 0;
+      const customer = await tx.customer.update({
+        where: { id },
+        data: { ...dto, phone: dto.phone === '' ? null : dto.phone, balance: { increment: delta } },
+      });
+      if (delta !== 0) await this.posting.postOpeningParty(tx, 'CUSTOMER', id, customer.name, delta, new Date(), user.id);
+      await this.audit.log(user.id, 'UPDATE', 'Customer', id, { ...dto }, tx);
+      return customer;
+    }, TX_OPTIONS);
   }
 
   async remove(id: string, user: AuthUser) {
@@ -242,6 +261,7 @@ export class CustomersController {
 }
 
 @Module({
+  imports: [RemindersModule],
   controllers: [CustomersController],
   providers: [CustomersService],
 })

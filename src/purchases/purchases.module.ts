@@ -27,6 +27,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Roles, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
 import { dateRange, docDate, nextDocNo, parseDay, num, paged, paging, paymentStatus, round2, round3, type Paging } from '../common/utils.js';
@@ -81,6 +82,7 @@ export class PurchasesService {
     private readonly stock: StockService,
     private readonly payments: PaymentsService,
     private readonly audit: AuditService,
+    private readonly posting: PostingService,
   ) {}
 
   async list(
@@ -247,7 +249,7 @@ export class PurchasesService {
         }
       }
 
-      await tx.vendor.update({ where: { id: dto.vendorId }, data: { balance: { increment: totalAmount } } });
+      const vendor = await tx.vendor.update({ where: { id: dto.vendorId }, data: { balance: { increment: totalAmount } } });
       if (paid > 0) {
         await this.payments.pay(tx, dto.vendorId, purchase.id, {
           amount: paid,
@@ -261,7 +263,9 @@ export class PurchasesService {
       }
 
       await this.audit.log(user.id, 'CREATE', 'Purchase', purchase.id, { purchaseNo, totalAmount }, tx);
-      return tx.purchase.findUniqueOrThrow({ where: { id: purchase.id } });
+      const full = await tx.purchase.findUniqueOrThrow({ where: { id: purchase.id }, include: { items: true } });
+      await this.posting.postPurchase(tx, full, vendor, settings);
+      return full;
     }, TX_OPTIONS);
   }
 
@@ -288,6 +292,7 @@ export class PurchasesService {
         where: { id: purchase.vendorId },
         data: { balance: { decrement: purchase.totalAmount } },
       });
+      await this.posting.reverse(tx, 'PURCHASE', id, { narration: `${purchase.purchaseNo} cancelled`, userId: user.id });
       await tx.purchase.update({ where: { id }, data: { status: 'CANCELLED', grnId: null } });
       await this.audit.log(user.id, 'CANCEL', 'Purchase', id, { purchaseNo: purchase.purchaseNo }, tx);
       return { cancelled: true };

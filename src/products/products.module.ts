@@ -24,7 +24,9 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
+import { storeBarcode } from '../common/barcode.js';
 import { CurrentUser, Roles, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
 import { nextSku, peekSku, skuPrefix } from '../common/sku.js';
 import { paged, paging, startOfDay, type Paging } from '../common/utils.js';
@@ -72,6 +74,7 @@ export class ProductsService {
     private readonly prisma: PrismaService,
     private readonly stock: StockService,
     private readonly audit: AuditService,
+    private readonly posting: PostingService,
   ) {}
 
   async list(
@@ -227,6 +230,7 @@ export class ProductsService {
       if (await tx.product.findUnique({ where: { sku } })) throw new BadRequestException(`SKU ${sku} already exists`);
       const product = await tx.product.create({ data: { ...data, sku, barcode: data.barcode || undefined } });
       if (openingStock?.quantity) {
+        const unitCost = openingStock.unitCost ?? dto.purchasePrice ?? 0;
         await this.stock.add(tx, {
           productId: product.id,
           branchId: needBranch(branchId),
@@ -234,17 +238,41 @@ export class ProductsService {
           mfgDate: openingStock.mfgDate ? new Date(openingStock.mfgDate) : undefined,
           expiryDate: openingStock.expiryDate ? new Date(openingStock.expiryDate) : undefined,
           quantity: openingStock.quantity,
-          unitCost: openingStock.unitCost ?? dto.purchasePrice ?? 0,
+          unitCost,
           mrp: dto.mrp,
           type: 'OPENING',
           refType: 'OPENING',
           note: 'Opening stock',
           userId: user.id,
         });
+        await this.posting.postOpeningStock(tx, product, openingStock.quantity, unitCost, new Date(), branchId, user.id);
       }
       await this.audit.log(user.id, 'CREATE', 'Product', product.id, { name: product.name, sku }, tx);
       return tx.product.findUniqueOrThrow({ where: { id: product.id } });
     }, TX_OPTIONS);
+  }
+
+  /** Gives a product an in-store EAN-13 barcode (kept if it already has one) */
+  async generateBarcode(id: string, user: AuthUser) {
+    return this.prisma.$transaction(async (tx) => {
+      const product = await tx.product.findUniqueOrThrow({ where: { id } });
+      if (product.barcode) return product;
+      let code = '';
+      do {
+        const seq = await tx.sequence.upsert({ where: { key: 'BARCODE' }, create: { key: 'BARCODE', value: 1 }, update: { value: { increment: 1 } } });
+        code = storeBarcode(seq.value);
+      } while (await tx.product.findUnique({ where: { barcode: code } }));
+      const saved = await tx.product.update({ where: { id }, data: { barcode: code } });
+      await this.audit.log(user.id, 'UPDATE', 'Product', id, { barcode: code }, tx);
+      return saved;
+    }, TX_OPTIONS);
+  }
+
+  /** Barcodes for every active product that has none */
+  async generateMissingBarcodes(user: AuthUser) {
+    const missing = await this.prisma.product.findMany({ where: { barcode: null, isActive: true }, select: { id: true } });
+    for (const p of missing) await this.generateBarcode(p.id, user);
+    return { generated: missing.length };
   }
 
   async update(id: string, dto: UpdateProductDto, user: AuthUser) {
@@ -301,6 +329,18 @@ export class ProductsController {
   @Roles('MANAGER')
   create(@Body() dto: CreateProductDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.products.create(dto, user, branchId);
+  }
+
+  @Post('barcodes/generate-missing')
+  @Roles('MANAGER')
+  generateMissing(@CurrentUser() user: AuthUser) {
+    return this.products.generateMissingBarcodes(user);
+  }
+
+  @Post(':id/barcode')
+  @Roles('MANAGER')
+  generateBarcode(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.products.generateBarcode(id, user);
   }
 
   @Patch(':id')

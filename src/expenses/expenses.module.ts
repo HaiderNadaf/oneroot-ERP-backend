@@ -1,12 +1,13 @@
 import { Body, Controller, Delete, Get, Injectable, Module, Param, Post, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsDateString, IsEnum, IsNumber, IsOptional, IsPositive, IsString } from 'class-validator';
+import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Roles, type AuthUser, BranchId } from '../common/decorators.js';
 import { dateRange, docDate, paged, paging, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { PaymentMode } from '../generated/prisma/enums.js';
-import { PrismaService } from '../prisma/prisma.service.js';
+import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 
 class CreateExpenseDto {
   @IsString() categoryId: string;
@@ -23,6 +24,7 @@ export class ExpensesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly posting: PostingService,
   ) {}
 
   async list(q: Paging & { categoryId?: string; from?: string; to?: string }, branchId: string | null = null) {
@@ -47,17 +49,24 @@ export class ExpensesService {
   }
 
   async create(dto: CreateExpenseDto, user: AuthUser, branchId: string | null = null) {
-    const expense = await this.prisma.expense.create({
-      data: { ...dto, expenseDate: docDate(dto.expenseDate), userId: user.id, branchId },
-    });
-    await this.audit.log(user.id, 'CREATE', 'Expense', expense.id, { amount: dto.amount });
-    return expense;
+    return this.prisma.$transaction(async (tx) => {
+      const expense = await tx.expense.create({
+        data: { ...dto, expenseDate: docDate(dto.expenseDate), userId: user.id, branchId },
+        include: { category: true },
+      });
+      await this.posting.postExpense(tx, expense, expense.category);
+      await this.audit.log(user.id, 'CREATE', 'Expense', expense.id, { amount: dto.amount }, tx);
+      return expense;
+    }, TX_OPTIONS);
   }
 
   async remove(id: string, user: AuthUser) {
-    const e = await this.prisma.expense.delete({ where: { id } });
-    await this.audit.log(user.id, 'DELETE', 'Expense', id, { amount: Number(e.amount) });
-    return { deleted: true };
+    return this.prisma.$transaction(async (tx) => {
+      const e = await tx.expense.delete({ where: { id } });
+      await this.posting.reverse(tx, 'EXPENSE', id, { narration: 'Expense deleted', userId: user.id });
+      await this.audit.log(user.id, 'DELETE', 'Expense', id, { amount: Number(e.amount) }, tx);
+      return { deleted: true };
+    }, TX_OPTIONS);
   }
 }
 

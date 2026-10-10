@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
+import { AccountingModule } from './accounting/accounting.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { BranchesModule } from './branches/branches.module.js';
@@ -35,6 +36,7 @@ import { SmsModule } from './sms/sms.module.js';
     }),
     PrismaModule,
     AuditModule,
+    AccountingModule,
     NotificationsModule,
     InventoryModule,
     PaymentsModule,

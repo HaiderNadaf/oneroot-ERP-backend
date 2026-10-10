@@ -16,13 +16,14 @@ import { PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsBoolean, IsEmail, IsInt, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 import { ValidateIf } from 'class-validator';
+import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
 import { num, paged, paging, round2, type Paging } from '../common/utils.js';
 import { GST_STATES, normalizeGstin, stateFromGstin } from '../common/gst.js';
 import { buildLedger, type LedgerEntry } from '../customers/customers.module.js';
 import type { Prisma } from '../generated/prisma/client.js';
-import { PrismaService } from '../prisma/prisma.service.js';
+import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 
 class CreateVendorDto {
   @IsString() name: string;
@@ -50,6 +51,7 @@ export class VendorsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly posting: PostingService,
   ) {}
 
   async list(q: Paging & { search?: string; withDues?: string; status?: string }) {
@@ -108,23 +110,29 @@ export class VendorsService {
     // Normalise the GSTIN and take the state from its first two digits when none was chosen
     const gstin = normalizeGstin(dto.gstin);
     dto = { ...dto, gstin: gstin as string, state: dto.state || stateFromGstin(gstin) || dto.state };
-    const vendor = await this.prisma.vendor.create({ data: { ...dto, balance: dto.openingBalance ?? 0 } });
-    await this.audit.log(user.id, 'CREATE', 'Vendor', vendor.id, { name: vendor.name });
-    return vendor;
+    return this.prisma.$transaction(async (tx) => {
+      const vendor = await tx.vendor.create({ data: { ...dto, balance: dto.openingBalance ?? 0 } });
+      await this.posting.postOpeningParty(tx, 'VENDOR', vendor.id, vendor.name, dto.openingBalance ?? 0, vendor.createdAt, user.id);
+      await this.audit.log(user.id, 'CREATE', 'Vendor', vendor.id, { name: vendor.name }, tx);
+      return vendor;
+    }, TX_OPTIONS);
   }
 
   async update(id: string, dto: UpdateVendorDto, user: AuthUser) {
     // Normalise the GSTIN and take the state from its first two digits when none was chosen
     const gstin = normalizeGstin(dto.gstin);
     dto = { ...dto, gstin: gstin as string, state: dto.state || stateFromGstin(gstin) || dto.state };
-    const existing = await this.prisma.vendor.findUniqueOrThrow({ where: { id } });
-    const delta = dto.openingBalance !== undefined ? round2(dto.openingBalance - num(existing.openingBalance)) : 0;
-    const vendor = await this.prisma.vendor.update({
-      where: { id },
-      data: { ...dto, balance: { increment: delta } },
-    });
-    await this.audit.log(user.id, 'UPDATE', 'Vendor', id, { ...dto });
-    return vendor;
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.vendor.findUniqueOrThrow({ where: { id } });
+      const delta = dto.openingBalance !== undefined ? round2(dto.openingBalance - num(existing.openingBalance)) : 0;
+      const vendor = await tx.vendor.update({
+        where: { id },
+        data: { ...dto, balance: { increment: delta } },
+      });
+      if (delta !== 0) await this.posting.postOpeningParty(tx, 'VENDOR', id, vendor.name, delta, new Date(), user.id);
+      await this.audit.log(user.id, 'UPDATE', 'Vendor', id, { ...dto }, tx);
+      return vendor;
+    }, TX_OPTIONS);
   }
 
   async remove(id: string, user: AuthUser) {

@@ -25,8 +25,10 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Roles, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
+import { overdueOf } from '../customers/credit.js';
 import {
   dateRange,
   docDate,
@@ -84,6 +86,8 @@ class CreateSaleDto {
   @IsOptional() @IsBoolean() isInterState?: boolean;
   @IsOptional() @IsBoolean() allowOverCreditLimit?: boolean;
   @IsOptional() @IsString() notes?: string;
+  /** Set by the POS for bills made offline; a retried sync returns the bill already created */
+  @IsOptional() @IsString() offlineId?: string;
 }
 
 class ReturnItemDto {
@@ -121,6 +125,7 @@ export class SalesService {
     private readonly payments: PaymentsService,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    private readonly posting: PostingService,
   ) {}
 
   async list(
@@ -203,6 +208,11 @@ export class SalesService {
   }
 
   async create(dto: CreateSaleDto, user: AuthUser, branchId: string) {
+    if (dto.offlineId) {
+      // The POS retries queued bills until they get through; never bill the same one twice
+      const existing = await this.prisma.sale.findUnique({ where: { offlineId: dto.offlineId }, include: { items: true } });
+      if (existing) return existing;
+    }
     const sale = await this.prisma.$transaction(async (tx) => {
       const settings = await tx.storeSettings.findUnique({ where: { id: 1 } });
       const date = docDate(dto.saleDate);
@@ -319,17 +329,27 @@ export class SalesService {
           'Select a registered customer to sell on credit',
         );
       }
-      if (
-        customer &&
-        due > 0 &&
-        num(customer.creditLimit) > 0 &&
-        !dto.allowOverCreditLimit
-      ) {
-        const newBalance = num(customer.balance) + due;
-        if (newBalance > num(customer.creditLimit)) {
+      if (customer && due > 0) {
+        if (customer.creditHold) {
           throw new BadRequestException(
-            `Credit limit exceeded for ${customer.name}: limit ₹${num(customer.creditLimit)}, balance would be ₹${round2(newBalance)}`,
+            `Credit is on hold for ${customer.name} — collect the dues first, or ask a manager to lift the hold`,
           );
+        }
+        if (!dto.allowOverCreditLimit) {
+          const newBalance = num(customer.balance) + due;
+          if (num(customer.creditLimit) > 0 && newBalance > num(customer.creditLimit)) {
+            throw new BadRequestException(
+              `Credit limit exceeded for ${customer.name}: limit ₹${num(customer.creditLimit)}, balance would be ₹${round2(newBalance)}`,
+            );
+          }
+          if (settings?.blockOverdueCredit) {
+            const overdue = await overdueOf(tx, customer, settings.reminderGraceDays, today);
+            if (overdue.amount > 0) {
+              throw new BadRequestException(
+                `Credit limit check: ${customer.name} has ₹${overdue.amount} overdue by ${overdue.days} days — collect it before giving more credit`,
+              );
+            }
+          }
         }
       }
 
@@ -347,7 +367,12 @@ export class SalesService {
           customerName: customer?.name ?? dto.customerName,
           customerPhone: customer?.phone ?? dto.customerPhone,
           saleDate: date,
-          dueDate: dto.dueDate ? parseDay(dto.dueDate) : undefined,
+          // Credit bills fall due after the customer's credit period
+          dueDate: dto.dueDate
+            ? parseDay(dto.dueDate)
+            : customer && due > 0 && customer.creditDays > 0
+              ? new Date(startOfDay(date).getTime() + customer.creditDays * 86_400_000)
+              : undefined,
           subtotal,
           discount: round2(grossTotal - lineTotal),
           taxAmount,
@@ -361,6 +386,7 @@ export class SalesService {
           paymentMode: dto.paymentMode,
           paymentStatus: 'UNPAID',
           isInterState,
+          offlineId: dto.offlineId || undefined,
           notes: dto.notes,
           userId: user.id,
         },
@@ -421,7 +447,9 @@ export class SalesService {
         { invoiceNo, totalAmount },
         tx,
       );
-      return tx.sale.findUniqueOrThrow({ where: { id: sale.id } });
+      const full = await tx.sale.findUniqueOrThrow({ where: { id: sale.id }, include: { items: true } });
+      await this.posting.postSale(tx, full);
+      return full;
     }, TX_OPTIONS);
     await this.lowStockAlert(dto.items.map((i) => i.productId));
     return sale;
@@ -524,6 +552,7 @@ export class SalesService {
           userId: user.id,
           items: { create: items },
         },
+        include: { items: true },
       });
       if (dto.refundMode === 'CREDIT' && sale.customerId) {
         // Credit note: reduce what the customer owes and settle this invoice's due first
@@ -540,6 +569,7 @@ export class SalesService {
             Math.min(due, total),
           );
       }
+      await this.posting.postSaleReturn(tx, ret, sale);
       await this.audit.log(
         user.id,
         'CREATE',
@@ -593,6 +623,11 @@ export class SalesService {
           },
         });
       }
+      // Books: undo the counter payments and the invoice itself
+      for (const p of sale.payments) {
+        await this.posting.reverse(tx, 'PAYMENT', p.id, { narration: `${p.paymentNo} removed — invoice ${sale.invoiceNo} cancelled`, userId: user.id });
+      }
+      await this.posting.reverse(tx, 'SALE', id, { narration: `Invoice ${sale.invoiceNo} cancelled`, userId: user.id });
       await tx.payment.deleteMany({ where: { saleId: id } });
       await tx.sale.update({
         where: { id },

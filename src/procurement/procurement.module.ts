@@ -28,6 +28,7 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Roles, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
 import {
@@ -272,6 +273,7 @@ export class ProcurementService {
     private readonly stock: StockService,
     private readonly payments: PaymentsService,
     private readonly audit: AuditService,
+    private readonly posting: PostingService,
     private readonly sms: SmsService,
   ) {}
 
@@ -409,6 +411,7 @@ export class ProcurementService {
                 sku: true,
                 unit: true,
                 hsnCode: true,
+                barcode: true,
                 trackBatch: true,
                 packSize: true,
               },
@@ -895,7 +898,7 @@ export class ProcurementService {
         items: {
           include: {
             product: {
-              select: { name: true, sku: true, unit: true, hsnCode: true },
+              select: { name: true, sku: true, unit: true, hsnCode: true, barcode: true, mrp: true, salePrice: true, packSize: true },
             },
             poItem: { select: { rate: true, gstRate: true, quantity: true } },
           },
@@ -1037,6 +1040,9 @@ export class ProcurementService {
             (r.expiredQty ? `, ${r.expiredQty} expired` : ''),
         );
       }
+
+      // Accepted stock is on the books at the PO rate until the vendor's bill is booked
+      await this.posting.postGrn(tx, await tx.grn.findUniqueOrThrow({ where: { id: grn.id }, include: { items: true } }), po.vendor.name);
 
       const items = await tx.purchaseOrderItem.findMany({ where: { poId } });
       const status = items.every((i) => pendingQty(i) <= 0)
@@ -1255,6 +1261,13 @@ export class ProcurementService {
         where: { id: grn.vendorId },
         data: { balance: { increment: totalAmount } },
       });
+      await this.posting.postPurchase(
+        tx,
+        await tx.purchase.findUniqueOrThrow({ where: { id: purchase.id }, include: { items: true } }),
+        vendor,
+        settings,
+        this.posting.grnValue(grn.items),
+      );
       const paid = Math.min(dto.paidAmount ?? 0, totalAmount);
       if (paid > 0) {
         await this.payments.pay(tx, grn.vendorId, purchase.id, {
@@ -1537,6 +1550,11 @@ export class ProcurementService {
         }
       }
       await tx.debitNote.update({ where: { id }, data: { status: 'SENT' } });
+      if (dn.affectsStock || dn.affectsBalance) {
+        const vendor = await tx.vendor.findUniqueOrThrow({ where: { id: dn.vendorId } });
+        const settings = await tx.storeSettings.findUnique({ where: { id: 1 } });
+        await this.posting.postNote(tx, dn, vendor, settings);
+      }
       await this.audit.log(
         user.id,
         'SEND',

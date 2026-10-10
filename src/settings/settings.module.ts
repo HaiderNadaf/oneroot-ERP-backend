@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Injectable, Module, Put } from '@nestjs/common';
-import { IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
 import { normalizeGstin, stateFromGstin } from '../common/gst.js';
@@ -27,7 +27,15 @@ class UpdateSettingsDto {
   @IsOptional() @IsString() receiptPrefix?: string;
   @IsOptional() @IsString() invoiceFooter?: string;
   @IsOptional() @IsInt() @Min(1) @Max(365) expiryAlertDays?: number;
+  @IsOptional() @IsIn(['A4', 'THERMAL_80', 'THERMAL_58']) receiptFormat?: string;
+  @IsOptional() @IsString() reminderTemplate?: string;
+  @IsOptional() @IsInt() @Min(0) @Max(90) reminderGraceDays?: number;
+  @IsOptional() @IsBoolean() autoReminders?: boolean;
+  @IsOptional() @IsBoolean() blockOverdueCredit?: boolean;
 }
+
+/** WhatsApp Cloud API keys are server-side only; the UI just needs to know whether they exist */
+const whatsappConfigured = () => !!(process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_PHONE_ID);
 
 @Injectable()
 export class SettingsService {
@@ -61,8 +69,8 @@ export class SettingsController {
   ) {}
 
   @Get()
-  get() {
-    return this.settings.get();
+  async get() {
+    return { ...(await this.settings.get()), whatsappConfigured: whatsappConfigured() };
   }
 
   @Put()
@@ -70,7 +78,7 @@ export class SettingsController {
   async update(@Body() dto: UpdateSettingsDto, @CurrentUser() user: AuthUser) {
     const result = await this.settings.update(dto);
     await this.audit.log(user.id, 'UPDATE', 'StoreSettings', '1', { ...dto });
-    return result;
+    return { ...result, whatsappConfigured: whatsappConfigured() };
   }
 }
 

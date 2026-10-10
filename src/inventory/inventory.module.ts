@@ -11,6 +11,7 @@ import {
   IsString,
   ValidateNested,
 } from 'class-validator';
+import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { BranchId, CurrentUser, needBranch, Roles, type AuthUser } from '../common/decorators.js';
 import { dateRange, docDate, nextDocNo, num, paged, paging, startOfDay, type Paging } from '../common/utils.js';
@@ -40,6 +41,7 @@ export class InventoryService {
     private readonly prisma: PrismaService,
     private readonly stock: StockService,
     private readonly audit: AuditService,
+    private readonly posting: PostingService,
   ) {}
 
   async batches(q: Paging & { productId?: string; status?: string; search?: string; expiry?: string }, branchId: string | null = null) {
@@ -135,30 +137,39 @@ export class InventoryService {
   async adjust(dto: AdjustmentDto, user: AuthUser, branchId: string) {
     return this.prisma.$transaction(async (tx) => {
       const ref = { refType: 'ADJUSTMENT', note: dto.reason, userId: user.id };
+      const product = await tx.product.findUniqueOrThrow({ where: { id: dto.productId } });
+      // Stock written off or added is also booked in the ledger (quantity × cost)
+      const book = (quantity: number, unitCost: number) =>
+        this.posting.postStockAdjustment(tx, { type: dto.type, productName: product.name, quantity, unitCost, reason: dto.reason, date: new Date(), branchId, userId: user.id });
       let result;
       if (dto.type === 'ADJUSTMENT_IN') {
         const existing = dto.batchId ? await tx.batch.findUnique({ where: { id: dto.batchId } }) : null;
-        const product = await tx.product.findUniqueOrThrow({ where: { id: dto.productId } });
+        const unitCost = dto.unitCost ?? Number(existing?.costPrice ?? product.purchasePrice);
         result = await this.stock.add(tx, {
           productId: dto.productId,
           branchId: existing?.branchId ?? branchId,
           batchNo: existing?.batchNo ?? dto.batchNo,
           expiryDate: dto.expiryDate ? new Date(dto.expiryDate) : undefined,
           quantity: dto.quantity,
-          unitCost: dto.unitCost ?? Number(existing?.costPrice ?? product.purchasePrice),
+          unitCost,
           type: 'ADJUSTMENT_IN',
           ...ref,
         });
+        await book(dto.quantity, unitCost);
       } else {
         let batchId = dto.batchId;
         if (!batchId) {
           // No batch chosen: take from the earliest-expiring batches
           const allocations = await this.stock.allocate(tx, dto.productId, dto.quantity, branchId);
-          for (const a of allocations) await this.stock.remove(tx, a.batchId, a.quantity, dto.type, ref);
+          for (const a of allocations) {
+            await this.stock.remove(tx, a.batchId, a.quantity, dto.type, ref);
+            await book(a.quantity, a.costPrice);
+          }
         } else {
           const batch = await tx.batch.findUniqueOrThrow({ where: { id: batchId } });
           if (batch.branchId !== branchId) throw new BadRequestException('That batch is in another branch');
           result = await this.stock.remove(tx, batchId, dto.quantity, dto.type, ref);
+          await book(dto.quantity, num(batch.costPrice));
         }
       }
       await this.audit.log(user.id, 'ADJUST', 'Product', dto.productId, { ...dto }, tx);

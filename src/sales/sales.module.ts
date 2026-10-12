@@ -58,6 +58,7 @@ import { PaymentsService } from '../payments/payments.module.js';
 import { PricingService } from '../pricing/pricing.module.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 import { SerialsService } from '../products/serials.module.js';
+import { VanService } from '../van/van.module.js';
 
 class SaleItemDto {
   @IsString() productId: string;
@@ -120,6 +121,8 @@ class CreateSaleDto {
   /** Manager approval for a discount above the cashier's limit (inbox approval id, or a PIN typed now) */
   @IsOptional() @IsString() approvalId?: string;
   @IsOptional() @IsString() managerPin?: string;
+  /** Billed on a van trip in the villages: sold from the van's load */
+  @IsOptional() @IsString() vanTripId?: string;
 }
 
 class ReturnItemDto {
@@ -168,6 +171,7 @@ export class SalesService {
     private readonly approvals: ApprovalsService,
     private readonly pricing: PricingService,
     private readonly serials: SerialsService,
+    private readonly van: VanService,
   ) {}
 
   async list(
@@ -269,8 +273,16 @@ export class SalesService {
       });
       const byId = new Map(products.map((p) => [p.id, p]));
 
-      // Counter discipline: no billing without an open shift (when the store switches it on)
-      if (settings?.requireOpenShift) {
+      // Van trip: the bill draws on that van's load
+      const trip = dto.vanTripId ? await tx.vanTrip.findUnique({ where: { id: dto.vanTripId } }) : null;
+      if (dto.vanTripId) {
+        if (!trip) throw new BadRequestException('Unknown van trip');
+        if (trip.status !== 'OPEN') throw new BadRequestException(`Van trip ${trip.tripNo} is closed`);
+        if (trip.branchId !== branchId) throw new BadRequestException(`Van trip ${trip.tripNo} belongs to another branch`);
+        if (trip.userId !== user.id && !hasPerm(user, 'cash.manage')) throw new BadRequestException(`Van trip ${trip.tripNo} is another salesperson's`);
+      }
+      // Counter discipline: no billing without an open shift (when the store switches it on); vans reconcile their own cash
+      if (settings?.requireOpenShift && !trip) {
         const shift = await tx.shift.findFirst({ where: { branchId, openedById: user.id, status: 'OPEN' }, select: { id: true } });
         if (!shift) throw new BadRequestException('Open your shift (enter the opening cash) before billing');
       }
@@ -292,6 +304,39 @@ export class SalesService {
         customerType: customer?.customerType ?? null,
         date,
       });
+
+      // Stock on vans: a van sells only what it carries; the counter cannot sell what is out on a van
+      {
+        const demand = new Map<string, number>();
+        dto.items.forEach((item, idx) => demand.set(item.productId, round3((demand.get(item.productId) ?? 0) + item.quantity + (priced.lines[idx]?.freeQty ?? 0))));
+        const ids = [...demand.keys()];
+        if (trip) {
+          const left = await this.van.onVan(tx, branchId, { tripId: trip.id, productIds: ids });
+          for (const [id, q] of demand) {
+            const have = left.get(id);
+            const name = byId.get(id)?.name ?? 'Product';
+            if (have === undefined) throw new BadRequestException(`${name} is not loaded on van trip ${trip.tripNo}`);
+            if (q > have + 1e-9) throw new BadRequestException(`${name}: only ${have} left on the van`);
+          }
+        } else {
+          const onVans = await this.van.onVan(tx, branchId, { productIds: ids });
+          if (onVans.size) {
+            const today0 = startOfDay(new Date());
+            const sellable = await tx.batch.groupBy({
+              by: ['productId'],
+              where: { productId: { in: [...onVans.keys()] }, branchId, quantity: { gt: 0 }, OR: [{ expiryDate: null }, { expiryDate: { gte: today0 } }] },
+              _sum: { quantity: true },
+            });
+            for (const [id, out] of onVans) {
+              if (out <= 0) continue;
+              const total = num(sellable.find((x) => x.productId === id)?._sum.quantity);
+              const counter = round3(total - out);
+              const q = demand.get(id) ?? 0;
+              if (q > counter + 1e-9) throw new BadRequestException(`${byId.get(id)?.name}: only ${Math.max(0, counter)} at the counter — ${out} are loaded on a van`);
+            }
+          }
+        }
+      }
 
       // 2. Resolve each line (and any free goods from a scheme) into batch allocations
       const today = startOfDay(new Date());
@@ -499,6 +544,8 @@ export class SalesService {
           aadhaarVerified: !!dto.aadhaarVerified,
           customerTypeName: priced.typeApplied ? priced.customerTypeName : null,
           approvalId: approval?.id ?? null,
+          channel: trip ? 'VAN' : 'COUNTER',
+          vanTripId: trip?.id ?? null,
           notes: dto.notes,
           userId: user.id,
         },

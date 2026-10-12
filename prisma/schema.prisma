@@ -191,6 +191,7 @@ model User {
   approvalsAsked    ApprovalRequest[] @relation("ApprovalRequestedBy")
   approvalsDecided  ApprovalRequest[] @relation("ApprovalDecidedBy")
   heldBills         HeldBill[]
+  vanTrips          VanTrip[]
   /// Home branch; staff only see this branch. Empty = can work in every branch
   branchId      String?
   branch        Branch?         @relation(fields: [branchId], references: [id])
@@ -246,6 +247,7 @@ model Branch {
   govtMatches    GovtStockMatch[]
   approvals      ApprovalRequest[]
   heldBills      HeldBill[]
+  vanTrips       VanTrip[]
   serials        SerialNumber[]
 }
 
@@ -401,6 +403,7 @@ model Product {
   govtMatches   GovtStockMatch[]
   schemes       SchemeProduct[]
   serials       SerialNumber[]
+  vanTripItems  VanTripItem[]
 
   @@index([name])
   @@index([type])
@@ -864,6 +867,10 @@ model Sale {
   isInterState  Boolean       @default(false)
   /// Set by the POS when the bill was made offline, so a retried sync never bills twice
   offlineId     String?       @unique
+  /// Where the bill was made: the counter or a van trip in the villages
+  channel       SaleChannel   @default(COUNTER)
+  vanTripId     String?
+  vanTrip       VanTrip?      @relation(fields: [vanTripId], references: [id])
   /// Receipt no. from the government fertiliser POS device (required when a subsidised product is billed)
   govtReceiptNo String?
   aadhaarVerified Boolean     @default(false)
@@ -889,6 +896,7 @@ model Sale {
   @@index([status, saleDate])
   @@index([paymentStatus])
   @@index([branchId, saleDate])
+  @@index([vanTripId])
 }
 
 model SaleItem {
@@ -1222,6 +1230,62 @@ model SerialNumber {
   @@unique([productId, serialNo])
   @@index([productId, branchId, status])
   @@index([saleItemId])
+}
+
+enum SaleChannel {
+  COUNTER
+  VAN
+}
+
+enum VanTripStatus {
+  OPEN
+  CLOSED
+}
+
+/// A van-stock day: stock loaded in the morning, billed on the route, reconciled in the evening
+model VanTrip {
+  id             String        @id @default(cuid())
+  tripNo         String        @unique
+  branchId       String
+  branch         Branch        @relation(fields: [branchId], references: [id])
+  /// Salesperson running the trip
+  userId         String
+  user           User          @relation(fields: [userId], references: [id])
+  date           DateTime      @default(now())
+  vehicleNo      String?
+  route          String?
+  status         VanTripStatus @default(OPEN)
+  openingCash    Decimal       @default(0) @db.Decimal(14, 2)
+  cashExpected   Decimal?      @db.Decimal(14, 2)
+  cashHandedOver Decimal?      @db.Decimal(14, 2)
+  cashDifference Decimal?      @db.Decimal(14, 2)
+  notes          String?
+  closeNote      String?
+  closedAt       DateTime?
+  closedById     String?
+  createdAt      DateTime      @default(now())
+
+  items VanTripItem[]
+  sales Sale[]
+
+  @@index([branchId, status])
+  @@index([userId, status])
+}
+
+model VanTripItem {
+  id          String   @id @default(cuid())
+  tripId      String
+  trip        VanTrip  @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id])
+  loadedQty   Decimal  @db.Decimal(12, 3)
+  /// Counted back at close
+  returnedQty Decimal? @db.Decimal(12, 3)
+  /// Missing at close (written off)
+  shortQty    Decimal? @db.Decimal(12, 3)
+  createdAt   DateTime @default(now())
+
+  @@unique([tripId, productId])
 }
 
 /// A POS cart parked while the farmer fetches money / another counter serves them; recalled later on any counter

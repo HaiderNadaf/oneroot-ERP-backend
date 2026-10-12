@@ -21,6 +21,7 @@ import type { Prisma } from '../generated/prisma/client.js';
 import type { StockMovementType } from '../generated/prisma/enums.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
+import { SerialsService } from '../products/serials.module.js';
 import { StockService } from './stock.service.js';
 
 const ADJUSTMENT_TYPES = ['ADJUSTMENT_IN', 'ADJUSTMENT_OUT', 'EXPIRED', 'DAMAGED'] as const;
@@ -34,6 +35,10 @@ class AdjustmentDto {
   @IsOptional() @IsString() batchNo?: string;
   @IsOptional() @IsDateString() expiryDate?: string;
   @IsOptional() @Type(() => Number) @IsNumber() unitCost?: number;
+  /** Rack / bin for stock-in */
+  @IsOptional() @IsString() location?: string;
+  /** Serial numbers: registered on stock-in, written off on stock-out (products that track serials) */
+  @IsOptional() @IsArray() @IsString({ each: true }) serialNos?: string[];
   @IsString() reason: string;
   /** Manager approval for a value above the user's adjustment limit */
   @IsOptional() @IsString() approvalId?: string;
@@ -48,6 +53,7 @@ export class InventoryService {
     private readonly audit: AuditService,
     private readonly posting: PostingService,
     private readonly approvals: ApprovalsService,
+    private readonly serials: SerialsService,
   ) {}
 
   async batches(q: Paging & { productId?: string; status?: string; search?: string; expiry?: string }, branchId: string | null = null) {
@@ -86,7 +92,7 @@ export class InventoryService {
       this.prisma.batch.findMany({
         where,
         include: {
-          product: { select: { id: true, name: true, sku: true, unit: true, type: true } },
+          product: { select: { id: true, name: true, sku: true, unit: true, type: true, location: true } },
           branch: { select: { id: true, code: true, name: true } },
         },
         orderBy: [{ expiryDate: { sort: 'asc', nulls: 'last' } }],
@@ -161,11 +167,16 @@ export class InventoryService {
           expiryDate: dto.expiryDate ? new Date(dto.expiryDate) : undefined,
           quantity: dto.quantity,
           unitCost,
+          location: dto.location ?? product.location,
           type: 'ADJUSTMENT_IN',
           ...ref,
         });
+        if (product.trackSerial && dto.serialNos?.length) {
+          await this.serials.register(tx, { productId: product.id, branchId: result.branchId, batchId: result.id, serialNos: dto.serialNos, refType: 'ADJUSTMENT', note: dto.reason });
+        }
         await book(dto.quantity, unitCost);
       } else {
+        if (product.trackSerial && dto.serialNos?.length) await this.serials.writeOff(tx, product.id, dto.serialNos, dto.quantity);
         let batchId = dto.batchId;
         if (!batchId) {
           // No batch chosen: take from the earliest-expiring batches

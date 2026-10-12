@@ -21,7 +21,9 @@ import { ProcurementModule } from './procurement/procurement.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { PricingModule } from './pricing/pricing.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
+import { ImportModule } from './products/import.service.js';
 import { ProductsModule } from './products/products.module.js';
+import { SerialsModule } from './products/serials.module.js';
 import { PurchasesModule } from './purchases/purchases.module.js';
 import { ReportsModule } from './reports/reports.module.js';
 import { SalesModule } from './sales/sales.module.js';
@@ -55,6 +57,8 @@ import { VendorsModule } from './vendors/vendors.module.js';
     SettingsModule,
     CategoriesModule,
     ProductsModule,
+    SerialsModule,
+    ImportModule,
     VendorsModule,
     CustomersModule,
     PurchasesModule,

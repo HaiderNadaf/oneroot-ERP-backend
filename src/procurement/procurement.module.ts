@@ -55,6 +55,7 @@ import { StockService } from '../inventory/stock.service.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
 import { PaymentsService } from '../payments/payments.module.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
+import { SerialsService } from '../products/serials.module.js';
 import { calcPurchaseItem } from '../purchases/purchases.module.js';
 import { ApprovalsService, type ChainStep } from './approvals.service.js';
 
@@ -100,6 +101,10 @@ class GrnItemDto {
   @IsOptional() @IsString() batchNo?: string;
   @IsOptional() @IsDateString() mfgDate?: string;
   @IsOptional() @IsDateString() expiryDate?: string;
+  /** Rack / bin the passed stock goes to */
+  @IsOptional() @IsString() location?: string;
+  /** Serial numbers of the passed units (products that track serials) */
+  @IsOptional() @IsArray() @IsString({ each: true }) serialNos?: string[];
 }
 
 class CreateGrnDto {
@@ -273,6 +278,7 @@ export class ProcurementService {
     private readonly payments: PaymentsService,
     private readonly audit: AuditService,
     private readonly posting: PostingService,
+    private readonly serials: SerialsService,
   ) {}
 
   private history(
@@ -411,6 +417,8 @@ export class ProcurementService {
                 hsnCode: true,
                 barcode: true,
                 trackBatch: true,
+                trackSerial: true,
+                location: true,
                 packSize: true,
               },
             },
@@ -982,6 +990,7 @@ export class ProcurementService {
             expiryDate: expiry,
             quantity: r.passedQty,
             unitCost: num(line.rate),
+            location: r.location ?? p.location,
             type: 'PURCHASE',
             refType: 'GRN',
             refId: grn.id,
@@ -989,6 +998,9 @@ export class ProcurementService {
             userId: user.id,
           });
           batchId = batch.id;
+          if (p.trackSerial && r.serialNos?.length) {
+            await this.serials.register(tx, { productId: p.id, branchId, batchId: batch.id, serialNos: r.serialNos, refType: 'GRN', refId: grn.id });
+          }
         }
         await tx.grnItem.create({
           data: {

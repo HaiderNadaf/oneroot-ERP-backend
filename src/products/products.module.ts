@@ -14,10 +14,12 @@ import {
 import { PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsArray,
   IsBoolean,
   IsDateString,
   IsEnum,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   Max,
@@ -34,6 +36,7 @@ import type { Prisma } from '../generated/prisma/client.js';
 import { ProductType } from '../generated/prisma/enums.js';
 import { StockService } from '../inventory/stock.service.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
+import { SerialsService } from './serials.module.js';
 
 class OpeningStockDto {
   @Type(() => Number) @IsNumber() @Min(0.001) quantity: number;
@@ -41,6 +44,8 @@ class OpeningStockDto {
   @IsOptional() @IsDateString() mfgDate?: string;
   @IsOptional() @IsDateString() expiryDate?: string;
   @IsOptional() @Type(() => Number) @IsNumber() unitCost?: number;
+  /** Serial numbers of the opening units (products that track serials) */
+  @IsOptional() @IsArray() @IsString({ each: true }) serialNos?: string[];
 }
 
 class CreateProductDto {
@@ -64,6 +69,12 @@ class CreateProductDto {
   @IsOptional() @IsBoolean() trackBatch?: boolean;
   /** Govt-subsidised fertiliser: bills need the govt POS receipt no. */
   @IsOptional() @IsBoolean() isSubsidised?: boolean;
+  /** Every unit carries a serial number; bills pick which serials leave */
+  @IsOptional() @IsBoolean() trackSerial?: boolean;
+  /** Usual rack / bin / shelf */
+  @IsOptional() @IsString() location?: string;
+  /** Values of the category's extra fields, keyed by field key */
+  @IsOptional() @IsObject() attributes?: Record<string, unknown>;
   @IsOptional() @IsBoolean() isActive?: boolean;
   @IsOptional() @ValidateNested() @Type(() => OpeningStockDto) openingStock?: OpeningStockDto;
 }
@@ -77,6 +88,7 @@ export class ProductsService {
     private readonly stock: StockService,
     private readonly audit: AuditService,
     private readonly posting: PostingService,
+    private readonly serials: SerialsService,
   ) {}
 
   async list(
@@ -139,7 +151,7 @@ export class ProductsService {
     const [items, total] = await Promise.all([
       this.prisma.product.findMany({
         where,
-        include: { category: { select: { id: true, name: true } } },
+        include: { category: { select: { id: true, name: true, fields: true } } },
         orderBy: [orderBy, { name: 'asc' }],
         skip: p.skip,
         take: p.take,
@@ -230,10 +242,12 @@ export class ProductsService {
       const sku =
         data.sku?.trim().toUpperCase() || (await nextSku(tx, await skuPrefix(tx, data.categoryId, data.type ?? 'OTHER')));
       if (await tx.product.findUnique({ where: { sku } })) throw new BadRequestException(`SKU ${sku} already exists`);
-      const product = await tx.product.create({ data: { ...data, sku, barcode: data.barcode || undefined } });
+      const product = await tx.product.create({
+        data: { ...data, sku, barcode: data.barcode || undefined, location: data.location?.trim() || undefined, attributes: data.attributes as Prisma.InputJsonValue | undefined },
+      });
       if (openingStock?.quantity) {
         const unitCost = openingStock.unitCost ?? dto.purchasePrice ?? 0;
-        await this.stock.add(tx, {
+        const batch = await this.stock.add(tx, {
           productId: product.id,
           branchId: needBranch(branchId),
           batchNo: product.trackBatch ? openingStock.batchNo : undefined,
@@ -242,11 +256,15 @@ export class ProductsService {
           quantity: openingStock.quantity,
           unitCost,
           mrp: dto.mrp,
+          location: product.location,
           type: 'OPENING',
           refType: 'OPENING',
           note: 'Opening stock',
           userId: user.id,
         });
+        if (product.trackSerial && openingStock.serialNos?.length) {
+          await this.serials.register(tx, { productId: product.id, branchId: needBranch(branchId), batchId: batch.id, serialNos: openingStock.serialNos, refType: 'OPENING', refId: product.id });
+        }
         await this.posting.postOpeningStock(tx, product, openingStock.quantity, unitCost, new Date(), branchId, user.id);
       }
       await this.audit.log(user.id, 'CREATE', 'Product', product.id, { name: product.name, sku }, tx);
@@ -278,12 +296,17 @@ export class ProductsService {
   }
 
   async update(id: string, dto: UpdateProductDto, user: AuthUser) {
-    const { openingStock: _ignored, ...data } = dto;
+    const { openingStock: _ignored, attributes, location, ...data } = dto;
     const product = await this.prisma.product.update({
       where: { id },
-      data: { ...data, barcode: data.barcode === '' ? null : data.barcode },
+      data: {
+        ...data,
+        barcode: data.barcode === '' ? null : data.barcode,
+        ...(location !== undefined ? { location: location.trim() || null } : {}),
+        ...(attributes !== undefined ? { attributes: attributes as Prisma.InputJsonValue } : {}),
+      },
     });
-    await this.audit.log(user.id, 'UPDATE', 'Product', id, { ...data });
+    await this.audit.log(user.id, 'UPDATE', 'Product', id, { ...data, location, attributes: attributes as Prisma.InputJsonValue | undefined });
     return product;
   }
 
@@ -362,5 +385,6 @@ export class ProductsController {
 @Module({
   controllers: [ProductsController],
   providers: [ProductsService],
+  exports: [ProductsService],
 })
 export class ProductsModule {}

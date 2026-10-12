@@ -11,7 +11,8 @@ import {
   Patch,
   Post,
 } from '@nestjs/common';
-import { IsOptional, IsString } from 'class-validator';
+import { IsArray, IsOptional, IsString } from 'class-validator';
+import type { Prisma } from '../generated/prisma/client.js';
 import { Can } from '../common/decorators.js';
 import { CODE_PATTERN, uniqueCode } from '../common/sku.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -21,12 +22,16 @@ class CategoryDto {
   @IsOptional() @IsString() description?: string;
   /** SKU prefix; generated from the name when left out */
   @IsOptional() @IsString() code?: string;
+  /** Extra fields for every product in this category: [{ key, label, type, options?, required?, showOnBill? }] */
+  @IsOptional() @IsArray() fields?: Record<string, unknown>[];
 }
 
 class UpdateCategoryDto {
   @IsOptional() @IsString() name?: string;
   @IsOptional() @IsString() description?: string;
   @IsOptional() @IsString() code?: string;
+  /** Extra fields for every product in this category: [{ key, label, type, options?, required?, showOnBill? }] */
+  @IsOptional() @IsArray() fields?: Record<string, unknown>[];
 }
 
 /** Gives every category without a SKU code one on start-up (FRT, SED, PST …) */
@@ -66,7 +71,7 @@ export class CategoriesController {
   @Can('products.manage')
   async create(@Body() dto: CategoryDto) {
     const code = dto.code ? await checkCode(this.prisma, dto.code) : await uniqueCode(this.prisma, dto.name);
-    return this.prisma.category.create({ data: { ...dto, code } });
+    return this.prisma.category.create({ data: { ...dto, code, fields: dto.fields as Prisma.InputJsonValue | undefined } });
   }
 
   @Patch(':id')
@@ -74,7 +79,7 @@ export class CategoriesController {
   async update(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
     // Changing the code only affects new products; existing SKUs stay as they are
     const code = dto.code ? await checkCode(this.prisma, dto.code, id) : undefined;
-    return this.prisma.category.update({ where: { id }, data: { ...dto, code } });
+    return this.prisma.category.update({ where: { id }, data: { ...dto, code, fields: dto.fields === undefined ? undefined : (dto.fields as Prisma.InputJsonValue) } });
   }
 
   @Delete(':id')

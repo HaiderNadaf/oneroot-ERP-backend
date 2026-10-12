@@ -6,7 +6,9 @@ import { AccountingModule } from './accounting/accounting.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { BranchesModule } from './branches/branches.module.js';
+import { CashModule } from './cash/cash.module.js';
 import { CategoriesModule } from './categories/categories.module.js';
+import { GovtModule } from './compliance/govt.module.js';
 import { AuthGuard } from './common/auth.guard.js';
 import { InvalidateOnWrite } from './common/invalidate.interceptor.js';
 import { CustomersModule } from './customers/customers.module.js';
@@ -36,6 +38,8 @@ import { VendorsModule } from './vendors/vendors.module.js';
     PrismaModule,
     AuditModule,
     AccountingModule,
+    CashModule,
+    GovtModule,
     NotificationsModule,
     InventoryModule,
     PaymentsModule,

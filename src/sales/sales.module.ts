@@ -88,6 +88,9 @@ class CreateSaleDto {
   @IsOptional() @IsString() notes?: string;
   /** Set by the POS for bills made offline; a retried sync returns the bill already created */
   @IsOptional() @IsString() offlineId?: string;
+  /** Receipt no. from the government fertiliser POS device — required when a subsidised product is billed */
+  @IsOptional() @IsString() govtReceiptNo?: string;
+  @IsOptional() @IsBoolean() aadhaarVerified?: boolean;
 }
 
 class ReturnItemDto {
@@ -103,6 +106,8 @@ class CreateReturnDto {
   items: ReturnItemDto[];
   @IsEnum(PaymentMode) refundMode: PaymentMode;
   @IsOptional() @IsString() reason?: string;
+  /** Reversal reference on the government POS, required when subsidised fertiliser is returned */
+  @IsOptional() @IsString() govtReversalRef?: string;
 }
 
 /** GST-inclusive line math: tax is backed out of the selling price */
@@ -196,7 +201,7 @@ export class SalesService {
         items: {
           include: {
             product: {
-              select: { sku: true, technicalName: true, packSize: true },
+              select: { sku: true, technicalName: true, packSize: true, isSubsidised: true },
             },
           },
         },
@@ -224,6 +229,17 @@ export class SalesService {
         where: { id: { in: dto.items.map((i) => i.productId) } },
       });
       const byId = new Map(products.map((p) => [p.id, p]));
+
+      // Counter discipline: no billing without an open shift (when the store switches it on)
+      if (settings?.requireOpenShift) {
+        const shift = await tx.shift.findFirst({ where: { branchId, openedById: user.id, status: 'OPEN' }, select: { id: true } });
+        if (!shift) throw new BadRequestException('Open your shift (enter the opening cash) before billing');
+      }
+      // Subsidised fertiliser is sold on the government POS device first; its receipt no. goes on our bill
+      const govtReceiptNo = dto.govtReceiptNo?.trim() || null;
+      if (products.some((p) => p.isSubsidised && dto.items.some((i) => i.productId === p.id)) && !govtReceiptNo) {
+        throw new BadRequestException('Govt fertiliser POS receipt no. is required for subsidised fertiliser');
+      }
 
       // 1. Resolve each requested line into one or more batch allocations
       const today = startOfDay(new Date());
@@ -387,6 +403,8 @@ export class SalesService {
           paymentStatus: 'UNPAID',
           isInterState,
           offlineId: dto.offlineId || undefined,
+          govtReceiptNo,
+          aadhaarVerified: !!dto.aadhaarVerified,
           notes: dto.notes,
           userId: user.id,
         },
@@ -493,6 +511,15 @@ export class SalesService {
           `This invoice still has ₹${saleDue} due — use a credit note so the return reduces what the customer owes`,
         );
       }
+      // Subsidised fertiliser must be reversed on the government POS before it comes back here
+      const returningIds = dto.items.map((r) => sale.items.find((i) => i.id === r.saleItemId)?.productId).filter((x): x is string => !!x);
+      const subsidised = await tx.product.count({ where: { id: { in: returningIds }, isSubsidised: true } });
+      if (subsidised > 0 && !dto.govtReversalRef?.trim()) {
+        throw new BadRequestException('Enter the reversal reference from the government fertiliser POS before returning subsidised fertiliser');
+      }
+      const shift = sale.branchId
+        ? await tx.shift.findFirst({ where: { branchId: sale.branchId, openedById: user.id, status: 'OPEN' }, select: { id: true } })
+        : null;
       const returnNo = await nextDocNo(tx, 'SRN');
       let total = 0;
       const items: {
@@ -549,6 +576,8 @@ export class SalesService {
           totalAmount: total,
           refundMode: dto.refundMode,
           reason: dto.reason,
+          govtReversalRef: dto.govtReversalRef?.trim() || null,
+          shiftId: shift?.id ?? null,
           userId: user.id,
           items: { create: items },
         },

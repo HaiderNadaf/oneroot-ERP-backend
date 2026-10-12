@@ -50,8 +50,10 @@ export class ExpensesService {
 
   async create(dto: CreateExpenseDto, user: AuthUser, branchId: string | null = null) {
     return this.prisma.$transaction(async (tx) => {
+      // Cash expenses paid from the drawer count against the cashier's open shift
+      const shift = branchId ? await tx.shift.findFirst({ where: { branchId, openedById: user.id, status: 'OPEN' }, select: { id: true } }) : null;
       const expense = await tx.expense.create({
-        data: { ...dto, expenseDate: docDate(dto.expenseDate), userId: user.id, branchId },
+        data: { ...dto, expenseDate: docDate(dto.expenseDate), userId: user.id, branchId, shiftId: shift?.id ?? null },
         include: { category: true },
       });
       await this.posting.postExpense(tx, expense, expense.category);

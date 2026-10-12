@@ -1,7 +1,9 @@
 import { Controller, Get, Injectable, Module, OnApplicationBootstrap, Query } from '@nestjs/common';
+import { CashService } from '../cash/cash.module.js';
 import { dashboardCache } from '../common/cache.js';
 import { BranchId, CurrentUser, type AuthUser } from '../common/decorators.js';
 import { endOfDay, num, round2, startOfDay } from '../common/utils.js';
+import { GovtModule, GovtService } from '../compliance/govt.module.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ReportsModule, ReportsService } from '../reports/reports.module.js';
@@ -53,6 +55,8 @@ export class DashboardService implements OnApplicationBootstrap {
   constructor(
     private readonly prisma: PrismaService,
     private readonly reports: ReportsService,
+    private readonly cash: CashService,
+    private readonly govt: GovtService,
   ) {}
 
   /** Pre-compute the default view after start-up so the first visit is instant */
@@ -116,6 +120,8 @@ export class DashboardService implements OnApplicationBootstrap {
       topProducts,
       topDues,
       counts,
+      cash,
+      govtMismatches,
     ] = await Promise.all([
       this.prisma.sale.aggregate({ where: curSale, _sum: { totalAmount: true }, _count: true }),
       this.prisma.sale.aggregate({ where: prevSale, _sum: { totalAmount: true } }),
@@ -260,6 +266,8 @@ export class DashboardService implements OnApplicationBootstrap {
         this.prisma.purchaseOrder.count({ where: { status: { in: ['DRAFT', 'PENDING_APPROVAL', 'SENT_BACK', 'APPROVED', 'PARTIALLY_RECEIVED'] }, branchId: B } }),
         this.prisma.user.count({ where: { isActive: true, ...(branchId ? { OR: [{ branchId }, { branchId: null }] } : {}) } }),
       ]),
+      this.cash.reconciliation(branchId),
+      this.govt.openMismatches(branchId),
     ]);
 
     // Side-by-side figures per branch, shown when looking at all branches
@@ -323,7 +331,11 @@ export class DashboardService implements OnApplicationBootstrap {
         lowStock: Number(lowStock[0]?.n ?? 0),
         grnsToInvoice,
         draftDebitNotes,
+        govtMismatches,
+        cashGaps: cash.unexplained,
+        openShifts: cash.openShifts,
       },
+      cash,
       trend: monthly.map((m) => ({ month: m.month, sales: num(m.sales), purchases: num(m.purchases) })),
       byCategory: byCategory.map((c) => ({ category: c.category, amount: num(c.amount) })),
       expiring: expiring.map((b) => ({
@@ -429,7 +441,7 @@ export class DashboardController {
 }
 
 @Module({
-  imports: [ReportsModule],
+  imports: [ReportsModule, GovtModule],
   controllers: [DashboardController],
   providers: [DashboardService],
 })

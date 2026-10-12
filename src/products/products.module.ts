@@ -62,6 +62,8 @@ class CreateProductDto {
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) purchasePrice?: number;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) reorderLevel?: number;
   @IsOptional() @IsBoolean() trackBatch?: boolean;
+  /** Govt-subsidised fertiliser: bills need the govt POS receipt no. */
+  @IsOptional() @IsBoolean() isSubsidised?: boolean;
   @IsOptional() @IsBoolean() isActive?: boolean;
   @IsOptional() @ValidateNested() @Type(() => OpeningStockDto) openingStock?: OpeningStockDto;
 }

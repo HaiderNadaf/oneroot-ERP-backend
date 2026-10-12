@@ -60,6 +60,13 @@ export class PaymentsService {
     return s?.receiptPrefix ?? 'RCT';
   }
 
+  /** The cashier's open shift, so counter cash is counted at shift close */
+  private async shiftId(tx: Tx, input: PaymentInput) {
+    if (!input.branchId || !input.userId) return null;
+    const s = await tx.shift.findFirst({ where: { branchId: input.branchId, openedById: input.userId, status: 'OPEN' }, select: { id: true } });
+    return s?.id ?? null;
+  }
+
   /** Money received from a customer (or walk-in at the counter when customerId is null) */
   async receive(tx: Tx, customerId: string | null, saleId: string | null, input: PaymentInput) {
     const paymentNo = await nextDocNo(tx, await this.prefix(tx), input.paymentDate);
@@ -71,6 +78,7 @@ export class PaymentsService {
         customerId,
         saleId,
         branchId: input.branchId ?? null,
+        shiftId: await this.shiftId(tx, input),
         amount: input.amount,
         mode: input.mode,
         reference: input.reference,
@@ -102,6 +110,7 @@ export class PaymentsService {
         vendorId,
         purchaseId,
         branchId: input.branchId ?? null,
+        shiftId: await this.shiftId(tx, input),
         amount: input.amount,
         mode: input.mode,
         reference: input.reference,

@@ -17,7 +17,8 @@ import { IsBoolean, IsEmail, IsInt, IsNumber, IsOptional, IsString, Min } from '
 import { ValidateIf } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
+import { PaymentsService } from '../payments/payments.module.js';
+import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
 import { num, paged, paging, round2, type Paging } from '../common/utils.js';
 import { normalizeGstin, stateFromGstin } from '../common/gst.js';
 import type { Prisma } from '../generated/prisma/client.js';
@@ -68,6 +69,7 @@ export class CustomersService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly posting: PostingService,
+    private readonly payments: PaymentsService,
   ) {}
 
   async list(q: Paging & { search?: string; withDues?: string; status?: string }) {
@@ -108,13 +110,18 @@ export class CustomersService {
       this.prisma.storeSettings.findUnique({ where: { id: 1 } }),
       this.prisma.customerReminder.findFirst({ where: { customerId: id }, orderBy: { sentAt: 'desc' } }),
     ]);
-    const overdue = await overdueOf(this.prisma, customer, settings?.reminderGraceDays ?? 7);
+    const [overdue, creditNoteBalance] = await Promise.all([
+      overdueOf(this.prisma, customer, settings?.reminderGraceDays ?? 7),
+      this.payments.availableCredit(this.prisma, id),
+    ]);
     return {
       ...customer,
       stats: { totalPurchases: stats._sum.totalAmount ?? 0, invoiceCount: stats._count, lastPurchase: stats._max.saleDate },
       recentSales,
       overdue,
       lastReminder,
+      /** Credit notes not yet applied to a bill — usable as a payment mode */
+      creditNoteBalance,
     };
   }
 
@@ -234,6 +241,7 @@ export function buildLedger<T extends { balance: unknown }>(
 }
 
 @Controller('customers')
+@Can('customers.view')
 export class CustomersController {
   constructor(private readonly customers: CustomersService) {}
 
@@ -253,17 +261,19 @@ export class CustomersController {
   }
 
   @Post()
+  @Can('customers.manage')
   create(@Body() dto: CreateCustomerDto, @CurrentUser() user: AuthUser) {
     return this.customers.create(dto, user);
   }
 
   @Patch(':id')
+  @Can('customers.manage')
   update(@Param('id') id: string, @Body() dto: UpdateCustomerDto, @CurrentUser() user: AuthUser) {
     return this.customers.update(id, dto, user);
   }
 
   @Delete(':id')
-  @Roles('MANAGER')
+  @Can('customers.delete')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.customers.remove(id, user);
   }

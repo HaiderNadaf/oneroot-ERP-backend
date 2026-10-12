@@ -26,6 +26,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
+import { ApprovalsService } from '../approvals/approvals.module.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Roles, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
 import { overdueOf } from '../customers/credit.js';
@@ -50,6 +51,7 @@ import { PaymentMode } from '../generated/prisma/enums.js';
 import { StockService, type Allocation } from '../inventory/stock.service.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
 import { PaymentsService } from '../payments/payments.module.js';
+import { PricingService } from '../pricing/pricing.module.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 
 class SaleItemDto {
@@ -91,6 +93,9 @@ class CreateSaleDto {
   /** Receipt no. from the government fertiliser POS device — required when a subsidised product is billed */
   @IsOptional() @IsString() govtReceiptNo?: string;
   @IsOptional() @IsBoolean() aadhaarVerified?: boolean;
+  /** Manager approval for a discount above the cashier's limit (inbox approval id, or a PIN typed now) */
+  @IsOptional() @IsString() approvalId?: string;
+  @IsOptional() @IsString() managerPin?: string;
 }
 
 class ReturnItemDto {
@@ -108,6 +113,9 @@ class CreateReturnDto {
   @IsOptional() @IsString() reason?: string;
   /** Reversal reference on the government POS, required when subsidised fertiliser is returned */
   @IsOptional() @IsString() govtReversalRef?: string;
+  /** Manager approval for a return above the cashier's limit or any cash / UPI refund */
+  @IsOptional() @IsString() approvalId?: string;
+  @IsOptional() @IsString() managerPin?: string;
 }
 
 /** GST-inclusive line math: tax is backed out of the selling price */
@@ -131,6 +139,8 @@ export class SalesService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly posting: PostingService,
+    private readonly approvals: ApprovalsService,
+    private readonly pricing: PricingService,
   ) {}
 
   async list(
@@ -203,6 +213,7 @@ export class SalesService {
             product: {
               select: { sku: true, technicalName: true, packSize: true, isSubsidised: true },
             },
+            scheme: { select: { name: true, type: true, claimable: true } },
           },
         },
         payments: { orderBy: { paymentDate: 'asc' } },
@@ -222,7 +233,7 @@ export class SalesService {
       const settings = await tx.storeSettings.findUnique({ where: { id: 1 } });
       const date = docDate(dto.saleDate);
       const customer = dto.customerId
-        ? await tx.customer.findUniqueOrThrow({ where: { id: dto.customerId } })
+        ? await tx.customer.findUniqueOrThrow({ where: { id: dto.customerId }, include: { customerType: true } })
         : null;
 
       const products = await tx.product.findMany({
@@ -241,24 +252,56 @@ export class SalesService {
         throw new BadRequestException('Govt fertiliser POS receipt no. is required for subsidised fertiliser');
       }
 
-      // 1. Resolve each requested line into one or more batch allocations
+      // 1. Pricing rules: the cashier's discount, then the best scheme per line, then the customer-type discount
+      const priced = await this.pricing.priceLines(tx, {
+        items: dto.items.map((i) => {
+          const product = byId.get(i.productId);
+          if (!product) throw new BadRequestException(`Unknown product ${i.productId}`);
+          if (!product.isActive) throw new BadRequestException(`${product.name} is inactive`);
+          return { productId: i.productId, quantity: i.quantity, rate: i.rate ?? num(product.salePrice), manualPct: i.discountPct ?? 0 };
+        }),
+        products,
+        customerType: customer?.customerType ?? null,
+        date,
+      });
+
+      // 2. Resolve each line (and any free goods from a scheme) into batch allocations
       const today = startOfDay(new Date());
       type Line = {
         product: (typeof products)[number];
         alloc: Allocation;
         rate: number;
         discountPct: number;
+        manualPct: number;
+        typePct: number;
+        schemeId: string | null;
+        isFree: boolean;
       };
       const lines: Line[] = [];
-      for (const item of dto.items) {
-        const product = byId.get(item.productId);
-        if (!product)
-          throw new BadRequestException(`Unknown product ${item.productId}`);
-        if (!product.isActive)
-          throw new BadRequestException(`${product.name} is inactive`);
-        const rate = item.rate ?? num(product.salePrice);
-        const discountPct = item.discountPct ?? 0;
-        let allocations: Allocation[];
+      // Paid units come first out of a FEFO allocation; whatever is left is the free goods
+      const split = (allocs: Allocation[], paidQty: number) => {
+        const paid: Allocation[] = [];
+        const free: Allocation[] = [];
+        let left = paidQty;
+        for (const a of allocs) {
+          if (left <= 1e-9) free.push(a);
+          else if (a.quantity <= left + 1e-9) {
+            paid.push(a);
+            left = round3(left - a.quantity);
+          } else {
+            paid.push({ ...a, quantity: round3(left) });
+            free.push({ ...a, quantity: round3(a.quantity - left) });
+            left = 0;
+          }
+        }
+        return { paid, free };
+      };
+      for (let idx = 0; idx < dto.items.length; idx++) {
+        const item = dto.items[idx];
+        const pl = priced.lines[idx];
+        const product = byId.get(item.productId)!;
+        let paid: Allocation[];
+        let free: Allocation[] = [];
         if (item.batchId) {
           const b = await tx.batch.findUniqueOrThrow({
             where: { id: item.batchId },
@@ -272,34 +315,35 @@ export class SalesService {
               `Batch ${b.batchNo} of ${product.name} has expired and cannot be sold`,
             );
           }
-          allocations = [
-            {
-              batchId: b.id,
-              batchNo: b.batchNo,
-              expiryDate: b.expiryDate,
-              costPrice: num(b.costPrice),
-              quantity: item.quantity,
-            },
-          ];
+          paid = [{ batchId: b.id, batchNo: b.batchNo, expiryDate: b.expiryDate, costPrice: num(b.costPrice), quantity: item.quantity }];
+          if (pl.freeQty > 0) free = await this.stock.allocate(tx, product.id, pl.freeQty, branchId);
         } else {
-          allocations = await this.stock.allocate(
-            tx,
-            product.id,
-            item.quantity,
-            branchId,
-          );
+          const all = await this.stock.allocate(tx, product.id, round3(item.quantity + pl.freeQty), branchId);
+          ({ paid, free } = split(all, item.quantity));
         }
-        for (const alloc of allocations)
-          lines.push({ product, alloc, rate, discountPct });
+        for (const alloc of paid)
+          lines.push({ product, alloc, rate: pl.rate, discountPct: pl.effectivePct, manualPct: pl.manualPct, typePct: pl.typePct, schemeId: pl.schemeId, isFree: false });
+        for (const alloc of free)
+          lines.push({ product, alloc, rate: 0, discountPct: 0, manualPct: 0, typePct: 0, schemeId: pl.schemeId, isFree: true });
       }
 
-      // 2. Spread any flat bill discount into the line discount percentages
+      // 3. Spread any flat bill discount into the line discount percentages
       const preTotal = lines.reduce(
         (s, l) => s + l.alloc.quantity * l.rate * (1 - l.discountPct / 100),
         0,
       );
       const billDiscount = Math.min(dto.discount ?? 0, preTotal);
       const extra = preTotal > 0 ? billDiscount / preTotal : 0;
+
+      // Discounts typed by the cashier (not schemes or customer types) are checked against the role's ceiling
+      const manualMax = round2(Math.max(0, ...priced.lines.map((l) => l.manualPct), preTotal > 0 ? (billDiscount / preTotal) * 100 : 0));
+      const approval = await this.approvals.authorize(tx, user, 'DISCOUNT', manualMax, {
+        approvalId: dto.approvalId,
+        pin: dto.managerPin,
+        branchId,
+        label: `discount of ${manualMax}%`,
+        details: { customer: customer?.name ?? dto.customerName ?? 'Walk-in', items: dto.items.length, total: Math.round(preTotal - billDiscount) },
+      });
 
       const computed = lines.map((l) => {
         const discountPct = round2(
@@ -405,6 +449,8 @@ export class SalesService {
           offlineId: dto.offlineId || undefined,
           govtReceiptNo,
           aadhaarVerified: !!dto.aadhaarVerified,
+          customerTypeName: priced.typeApplied ? priced.customerTypeName : null,
+          approvalId: approval?.id ?? null,
           notes: dto.notes,
           userId: user.id,
         },
@@ -430,6 +476,10 @@ export class SalesService {
             quantity: l.alloc.quantity,
             rate: l.rate,
             discountPct: l.discountPct,
+            manualDiscountPct: l.manualPct,
+            typeDiscountPct: l.typePct,
+            schemeId: l.schemeId,
+            isFree: l.isFree,
             gstRate: l.gstRate,
             taxableAmount: l.taxableAmount,
             taxAmount: l.taxAmount,
@@ -568,6 +618,17 @@ export class SalesService {
         });
       }
       total = round2(total);
+      // Above the role's return limit — or any cash / UPI refund by a limited role — needs a manager
+      const limits = await this.approvals.limitFor(user, tx);
+      const cashRefund = dto.refundMode !== 'CREDIT';
+      const approval = await this.approvals.authorize(tx, user, 'RETURN', total, {
+        approvalId: dto.approvalId,
+        pin: dto.managerPin,
+        branchId: sale.branchId,
+        force: cashRefund && limits.returnLimit !== null,
+        label: cashRefund ? `cash / UPI refund of ₹${total}` : `return of ₹${total}`,
+        details: { invoiceNo: sale.invoiceNo, refundMode: dto.refundMode, total, customer: sale.customerName },
+      });
       const ret = await tx.saleReturn.create({
         data: {
           returnNo,
@@ -578,6 +639,7 @@ export class SalesService {
           reason: dto.reason,
           govtReversalRef: dto.govtReversalRef?.trim() || null,
           shiftId: shift?.id ?? null,
+          approvalId: approval?.id ?? null,
           userId: user.id,
           items: { create: items },
         },

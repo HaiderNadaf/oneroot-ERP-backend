@@ -36,12 +36,17 @@ import { PaymentMode, PurchaseOrderStatus } from '../generated/prisma/enums.js';
 import { StockService } from '../inventory/stock.service.js';
 import { PaymentsService } from '../payments/payments.module.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
+import { SerialsService } from '../products/serials.module.js';
 
 class PurchaseItemDto {
   @IsString() productId: string;
   @IsOptional() @IsString() batchNo?: string;
   @IsOptional() @IsDateString() mfgDate?: string;
   @IsOptional() @IsDateString() expiryDate?: string;
+  /** Rack / bin the stock goes to */
+  @IsOptional() @IsString() location?: string;
+  /** Serial numbers of the units received (products that track serials) */
+  @IsOptional() @IsArray() @IsString({ each: true }) serialNos?: string[];
   @Type(() => Number) @IsNumber() @IsPositive() quantity: number;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) freeQty?: number;
   /** Rate per unit, before GST */
@@ -83,6 +88,7 @@ export class PurchasesService {
     private readonly payments: PaymentsService,
     private readonly audit: AuditService,
     private readonly posting: PostingService,
+    private readonly serials: SerialsService,
   ) {}
 
   async list(
@@ -212,12 +218,16 @@ export class PurchasesService {
           quantity: receivedQty,
           unitCost,
           mrp: l.mrp,
+          location: l.location ?? l.product.location,
           type: 'PURCHASE',
           refType: 'PURCHASE',
           refId: purchase.id,
           refNo: purchaseNo,
           userId: user.id,
         });
+        if (l.product.trackSerial && l.serialNos?.length) {
+          await this.serials.register(tx, { productId: l.productId, branchId, batchId: batch.id, serialNos: l.serialNos, refType: 'PURCHASE', refId: purchase.id });
+        }
         await tx.purchaseItem.create({
           data: {
             purchaseId: purchase.id,

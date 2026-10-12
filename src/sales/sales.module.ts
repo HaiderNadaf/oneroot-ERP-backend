@@ -57,11 +57,14 @@ import { NotificationsService } from '../notifications/notifications.module.js';
 import { PaymentsService } from '../payments/payments.module.js';
 import { PricingService } from '../pricing/pricing.module.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
+import { SerialsService } from '../products/serials.module.js';
 
 class SaleItemDto {
   @IsString() productId: string;
   /** Sell from a specific batch; otherwise picked first-expiry-first-out */
   @IsOptional() @IsString() batchId?: string;
+  /** Serial numbers of the units leaving (products that track serials): one per unit */
+  @IsOptional() @IsArray() @IsString({ each: true }) serialNos?: string[];
   @Type(() => Number) @IsNumber() @IsPositive() quantity: number;
   /** GST-inclusive price per unit; defaults to the product's sale price */
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) rate?: number;
@@ -122,6 +125,8 @@ class CreateSaleDto {
 class ReturnItemDto {
   @IsString() saleItemId: string;
   @Type(() => Number) @IsNumber() @IsPositive() quantity: number;
+  /** Which serial units came back (else the first ones sold on the line) */
+  @IsOptional() @IsArray() @IsString({ each: true }) serialNos?: string[];
 }
 
 class CreateReturnDto {
@@ -162,6 +167,7 @@ export class SalesService {
     private readonly posting: PostingService,
     private readonly approvals: ApprovalsService,
     private readonly pricing: PricingService,
+    private readonly serials: SerialsService,
   ) {}
 
   async list(
@@ -235,6 +241,7 @@ export class SalesService {
               select: { sku: true, technicalName: true, packSize: true, isSubsidised: true },
             },
             scheme: { select: { name: true, type: true, claimable: true } },
+            serials: { select: { serialNo: true }, orderBy: { serialNo: 'asc' } },
           },
         },
         payments: { orderBy: { paymentDate: 'asc' } },
@@ -297,6 +304,8 @@ export class SalesService {
         typePct: number;
         schemeId: string | null;
         isFree: boolean;
+        /** Which request line it came from (serial numbers are given per request line) */
+        itemIdx: number;
       };
       const lines: Line[] = [];
       // Paid units come first out of a FEFO allocation; whatever is left is the free goods
@@ -343,9 +352,9 @@ export class SalesService {
           ({ paid, free } = split(all, item.quantity));
         }
         for (const alloc of paid)
-          lines.push({ product, alloc, rate: pl.rate, discountPct: pl.effectivePct, manualPct: pl.manualPct, typePct: pl.typePct, schemeId: pl.schemeId, isFree: false });
+          lines.push({ product, alloc, rate: pl.rate, discountPct: pl.effectivePct, manualPct: pl.manualPct, typePct: pl.typePct, schemeId: pl.schemeId, isFree: false, itemIdx: idx });
         for (const alloc of free)
-          lines.push({ product, alloc, rate: 0, discountPct: 0, manualPct: 0, typePct: 0, schemeId: pl.schemeId, isFree: true });
+          lines.push({ product, alloc, rate: 0, discountPct: 0, manualPct: 0, typePct: 0, schemeId: pl.schemeId, isFree: true, itemIdx: idx });
       }
 
       // 3. Spread any flat bill discount into the line discount percentages
@@ -495,6 +504,8 @@ export class SalesService {
         },
       });
 
+      // Serial numbers are given per request line; each batch allocation takes the next ones in order
+      const serialQueues = dto.items.map((i) => [...(i.serialNos ?? [])]);
       for (const l of computed) {
         await this.stock.remove(tx, l.alloc.batchId, l.alloc.quantity, 'SALE', {
           refType: 'SALE',
@@ -502,7 +513,7 @@ export class SalesService {
           refNo: invoiceNo,
           userId: user.id,
         });
-        await tx.saleItem.create({
+        const saleItem = await tx.saleItem.create({
           data: {
             saleId: sale.id,
             productId: l.product.id,
@@ -526,6 +537,10 @@ export class SalesService {
             costPrice: l.alloc.costPrice,
           },
         });
+        if (l.product.trackSerial) {
+          const take = serialQueues[l.itemIdx].splice(0, Math.round(l.alloc.quantity));
+          await this.serials.sell(tx, { productId: l.product.id, branchId, quantity: l.alloc.quantity, serialNos: take, saleItemId: saleItem.id, productName: l.product.name });
+        }
       }
 
       if (customer) {
@@ -681,6 +696,7 @@ export class SalesService {
           where: { id: item.id },
           data: { returnedQty: { increment: r.quantity } },
         });
+        await this.serials.restore(tx, item.id, r.quantity, r.serialNos);
         await this.stock.add(tx, {
           productId: item.productId,
           // Returned goods go back into the branch that sold them
@@ -770,6 +786,7 @@ export class SalesService {
           'Sale has returns — cancel is not allowed',
         );
       for (const item of sale.items) {
+        await this.serials.restore(tx, item.id, num(item.quantity));
         await this.stock.add(tx, {
           productId: item.productId,
           branchId: sale.branchId ?? 'main',

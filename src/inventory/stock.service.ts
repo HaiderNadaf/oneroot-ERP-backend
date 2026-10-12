@@ -25,6 +25,8 @@ export interface AddStockInput extends Ref {
   quantity: number;
   unitCost?: number;
   mrp?: number | null;
+  /** Rack / bin the lot goes to (kept if not given) */
+  location?: string | null;
   type: StockMovementType;
 }
 
@@ -57,9 +59,11 @@ export class StockService {
         costPrice: input.unitCost ?? 0,
         mrp: input.mrp ?? undefined,
         quantity: input.quantity,
+        location: input.location?.trim() || undefined,
       },
       update: {
         quantity: { increment: input.quantity },
+        ...(input.location?.trim() ? { location: input.location.trim() } : {}),
         ...(input.unitCost !== undefined && input.type === 'PURCHASE' ? { costPrice: input.unitCost } : {}),
         ...(input.expiryDate ? { expiryDate: input.expiryDate } : {}),
         ...(input.mfgDate ? { mfgDate: input.mfgDate } : {}),

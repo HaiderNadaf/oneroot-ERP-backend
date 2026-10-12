@@ -122,6 +122,26 @@ enum AccountType {
   EXPENSE
 }
 
+enum ApprovalKind {
+  DISCOUNT
+  RETURN
+  ADJUSTMENT
+  OTHER
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  USED
+}
+
+enum SchemeType {
+  BUY_X_GET_Y
+  PCT_OFF
+  FLAT_OFF
+}
+
 enum ShiftStatus {
   OPEN
   CLOSED
@@ -143,6 +163,8 @@ model User {
   email        String    @unique
   phone        String?
   passwordHash String
+  /// Approval PIN (hashed) for managers who sign off counter overrides
+  pinHash      String?
   role         Role      @default(CASHIER)
   isActive     Boolean   @default(true)
   lastLoginAt  DateTime?
@@ -160,6 +182,8 @@ model User {
   createdPos    PurchaseOrder[] @relation("PoCreatedBy")
   grns          Grn[]
   shiftsOpened  Shift[]         @relation("ShiftOpenedBy")
+  approvalsAsked    ApprovalRequest[] @relation("ApprovalRequestedBy")
+  approvalsDecided  ApprovalRequest[] @relation("ApprovalDecidedBy")
   /// Home branch; staff only see this branch. Empty = can work in every branch
   branchId      String?
   branch        Branch?         @relation(fields: [branchId], references: [id])
@@ -197,6 +221,7 @@ model Branch {
   shifts         Shift[]
   deposits       BankDeposit[]
   govtMatches    GovtStockMatch[]
+  approvals      ApprovalRequest[]
 }
 
 /// Stock moved from one branch to another (batch, expiry and cost travel with it)
@@ -341,6 +366,7 @@ model Product {
 
   transferItems StockTransferItem[]
   govtMatches   GovtStockMatch[]
+  schemes       SchemeProduct[]
 
   @@index([name])
   @@index([type])
@@ -448,6 +474,9 @@ model Customer {
   pincode        String?
   landAcres      Decimal? @db.Decimal(8, 2)
   crops          String? // comma separated: "Paddy, Sugarcane"
+  /// FPO, bulk buyer… decides an automatic discount at the counter
+  customerTypeId String?
+  customerType   CustomerType? @relation(fields: [customerTypeId], references: [id])
   creditLimit    Decimal  @default(0) @db.Decimal(14, 2)
   /// Credit period: unpaid bills fall due this many days after the sale (0 = due immediately)
   creditDays     Int      @default(0)
@@ -800,6 +829,10 @@ model Sale {
   /// Receipt no. from the government fertiliser POS device (required when a subsidised product is billed)
   govtReceiptNo String?
   aadhaarVerified Boolean     @default(false)
+  /// Customer type whose discount applied, as named at the time
+  customerTypeName String?
+  /// Manager approval used for a discount above the cashier's limit
+  approvalId    String?
   notes         String?
   userId        String?
   user          User?         @relation(fields: [userId], references: [id])
@@ -842,6 +875,13 @@ model SaleItem {
   amount        Decimal   @db.Decimal(14, 2)
   costPrice     Decimal   @default(0) @db.Decimal(12, 2)
   returnedQty   Decimal   @default(0) @db.Decimal(12, 3)
+  /// Discount typed by the cashier (part of discountPct, which also holds scheme and customer-type discounts)
+  manualDiscountPct Decimal @default(0) @db.Decimal(5, 2)
+  typeDiscountPct   Decimal @default(0) @db.Decimal(5, 2)
+  schemeId      String?
+  scheme        Scheme?   @relation(fields: [schemeId], references: [id])
+  /// Free goods line from a buy-X-get-Y scheme (rate 0, stock still goes out)
+  isFree        Boolean   @default(false)
 
   returnItems SaleReturnItem[]
 
@@ -862,6 +902,7 @@ model SaleReturn {
   reason      String?
   /// Reversal reference on the government POS, required when subsidised fertiliser comes back
   govtReversalRef String?
+  approvalId  String?
   shiftId     String?
   shift       Shift?      @relation(fields: [shiftId], references: [id])
   userId      String?
@@ -1097,4 +1138,92 @@ model GovtStockMatch {
   updatedAt   DateTime  @updatedAt
 
   @@unique([date, branchId, productId])
+}
+
+// ───────────────────────── Authority limits & approvals ─────────────────────────
+
+/// What each role may do on its own; anything above goes to a manager (PIN at the counter or the approvals inbox).
+/// A null limit means no limit.
+model RoleLimit {
+  role            Role     @id
+  maxDiscountPct  Decimal? @db.Decimal(5, 2)
+  returnLimit     Decimal? @db.Decimal(14, 2)
+  adjustmentLimit Decimal? @db.Decimal(14, 2)
+  seeCostPrice    Boolean  @default(false)
+  updatedAt       DateTime @updatedAt
+}
+
+/// An override request: who asked, for what, who approved, and when it was used
+model ApprovalRequest {
+  id            String         @id @default(cuid())
+  kind          ApprovalKind
+  amount        Decimal        @db.Decimal(14, 2)
+  details       Json?
+  reason        String?
+  requestedById String
+  requestedBy   User           @relation("ApprovalRequestedBy", fields: [requestedById], references: [id])
+  status        ApprovalStatus @default(PENDING)
+  decidedById   String?
+  decidedBy     User?          @relation("ApprovalDecidedBy", fields: [decidedById], references: [id])
+  decidedAt     DateTime?
+  note          String?
+  /// Approved with a manager PIN at the counter rather than from the inbox
+  byPin         Boolean        @default(false)
+  usedAt        DateTime?
+  usedRef       String?
+  branchId      String?
+  branch        Branch?        @relation(fields: [branchId], references: [id])
+  createdAt     DateTime       @default(now())
+
+  @@index([status, createdAt])
+  @@index([requestedById, createdAt])
+}
+
+// ───────────────────────── Schemes & customer types ─────────────────────────
+
+/// Company scheme applied automatically at the counter: buy X get Y free, % off or flat ₹ off per unit
+model Scheme {
+  id        String     @id @default(cuid())
+  name      String
+  type      SchemeType
+  buyQty    Int?
+  freeQty   Int?
+  pct       Decimal?   @db.Decimal(5, 2)
+  flat      Decimal?   @db.Decimal(12, 2)
+  from      DateTime
+  to        DateTime?
+  /// Cost is claimed back from the company
+  claimable Boolean    @default(true)
+  isActive  Boolean    @default(true)
+  notes     String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  products  SchemeProduct[]
+  saleItems SaleItem[]
+
+  @@index([isActive, from])
+}
+
+model SchemeProduct {
+  schemeId  String
+  scheme    Scheme  @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@id([schemeId, productId])
+}
+
+/// Customer groups with a fixed discount, e.g. FPO 3 %, bulk buyer 2 % above ₹25,000
+model CustomerType {
+  id                String     @id @default(cuid())
+  name              String     @unique
+  discountPct       Decimal    @default(0) @db.Decimal(5, 2)
+  /// Discount applies only when the bill (after schemes) reaches this amount
+  minBill           Decimal    @default(0) @db.Decimal(14, 2)
+  excludeSubsidised Boolean    @default(true)
+  isActive          Boolean    @default(true)
+  createdAt         DateTime   @default(now())
+
+  customers Customer[]
 }

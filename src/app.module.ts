@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 import { AccountingModule } from './accounting/accounting.module.js';
+import { ApprovalsModule } from './approvals/approvals.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { BranchesModule } from './branches/branches.module.js';
@@ -18,6 +19,7 @@ import { InventoryModule } from './inventory/inventory.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { ProcurementModule } from './procurement/procurement.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
+import { PricingModule } from './pricing/pricing.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { ProductsModule } from './products/products.module.js';
 import { PurchasesModule } from './purchases/purchases.module.js';
@@ -38,9 +40,11 @@ import { VendorsModule } from './vendors/vendors.module.js';
     PrismaModule,
     AuditModule,
     AccountingModule,
+    NotificationsModule,
+    ApprovalsModule,
+    PricingModule,
     CashModule,
     GovtModule,
-    NotificationsModule,
     InventoryModule,
     PaymentsModule,
     AuthModule,

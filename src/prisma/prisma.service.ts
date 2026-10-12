@@ -10,9 +10,11 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         connectionString: process.env.DATABASE_URL,
         // Neon suspends idle databases; waking one up from India can take longer than the 5s default
         connectionTimeoutMillis: 30_000,
-        // Each new connection costs several round trips (TCP + TLS + auth), so keep a warm pool
+        // Each new connection costs several round trips (TCP + TLS + auth), so keep a warm pool —
+        // but recycle idle ones well before Neon's ~5 min idle cut-off, or the next request after a
+        // quiet spell lands on a dead socket ("Server has closed the connection", P1017)
         max: 20,
-        idleTimeoutMillis: 5 * 60_000,
+        idleTimeoutMillis: 60_000,
         keepAlive: true,
       }),
     });

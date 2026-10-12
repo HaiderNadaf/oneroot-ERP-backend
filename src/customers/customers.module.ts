@@ -38,6 +38,8 @@ class CreateCustomerDto {
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) landAcres?: number;
   @IsOptional() @IsString() crops?: string;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) creditLimit?: number;
+  /** FPO / bulk buyer… for an automatic counter discount */
+  @IsOptional() @IsString() customerTypeId?: string | null;
   /** Credit period in days; unpaid bills fall due after it */
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) creditDays?: number;
   /** Stop credit sales until a manager lifts the hold */
@@ -82,14 +84,14 @@ export class CustomersService {
       ];
     }
     const [items, total] = await Promise.all([
-      this.prisma.customer.findMany({ where, orderBy: { name: 'asc' }, skip: p.skip, take: p.take }),
+      this.prisma.customer.findMany({ where, include: { customerType: true }, orderBy: { name: 'asc' }, skip: p.skip, take: p.take }),
       this.prisma.customer.count({ where }),
     ]);
     return paged(items, total, p);
   }
 
   async get(id: string) {
-    const customer = await this.prisma.customer.findUniqueOrThrow({ where: { id } });
+    const customer = await this.prisma.customer.findUniqueOrThrow({ where: { id }, include: { customerType: true } });
     const [stats, recentSales, settings, lastReminder] = await Promise.all([
       this.prisma.sale.aggregate({
         where: { customerId: id, status: 'COMPLETED' },
@@ -125,7 +127,8 @@ export class CustomersService {
     }
     return this.prisma.$transaction(async (tx) => {
       const customer = await tx.customer.create({
-        data: { ...dto, phone: dto.phone || undefined, balance: dto.openingBalance ?? 0 },
+        data: { ...dto, phone: dto.phone || undefined, customerTypeId: dto.customerTypeId || null, balance: dto.openingBalance ?? 0 },
+        include: { customerType: true },
       });
       await this.posting.postOpeningParty(tx, 'CUSTOMER', customer.id, customer.name, dto.openingBalance ?? 0, customer.createdAt, user.id);
       await this.audit.log(user.id, 'CREATE', 'Customer', customer.id, { name: customer.name }, tx);
@@ -142,7 +145,13 @@ export class CustomersService {
       const delta = dto.openingBalance !== undefined ? round2(dto.openingBalance - num(existing.openingBalance)) : 0;
       const customer = await tx.customer.update({
         where: { id },
-        data: { ...dto, phone: dto.phone === '' ? null : dto.phone, balance: { increment: delta } },
+        data: {
+          ...dto,
+          phone: dto.phone === '' ? null : dto.phone,
+          ...(dto.customerTypeId !== undefined ? { customerTypeId: dto.customerTypeId || null } : {}),
+          balance: { increment: delta },
+        },
+        include: { customerType: true },
       });
       if (delta !== 0) await this.posting.postOpeningParty(tx, 'CUSTOMER', id, customer.name, delta, new Date(), user.id);
       await this.audit.log(user.id, 'UPDATE', 'Customer', id, { ...dto }, tx);

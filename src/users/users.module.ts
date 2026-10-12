@@ -10,7 +10,7 @@ import {
   Post,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
-import { IsBoolean, IsEmail, IsEnum, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsBoolean, IsEmail, IsEnum, IsOptional, IsString, Matches, MinLength } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
 import { Role } from '../generated/prisma/enums.js';
@@ -34,6 +34,8 @@ class UpdateUserDto {
   @IsOptional() @IsEnum(Role) role?: Role;
   @IsOptional() @IsBoolean() isActive?: boolean;
   @IsOptional() @IsString() @MinLength(6) password?: string;
+  /** Approval PIN for managers / owner (4–6 digits); empty string removes it */
+  @IsOptional() @IsString() @Matches(/^(\d{4,6})?$/, { message: 'PIN must be 4 to 6 digits' }) pin?: string;
 }
 
 const publicFields = {
@@ -47,7 +49,11 @@ const publicFields = {
   isActive: true,
   lastLoginAt: true,
   createdAt: true,
+  pinHash: true,
 } as const;
+
+/** Never send the hash itself, only whether a PIN is set */
+const strip = <T extends { pinHash: string | null }>({ pinHash, ...u }: T) => ({ ...u, hasPin: !!pinHash });
 
 @Injectable()
 export class UsersService {
@@ -56,8 +62,8 @@ export class UsersService {
     private readonly audit: AuditService,
   ) {}
 
-  list() {
-    return this.prisma.user.findMany({ select: publicFields, orderBy: { createdAt: 'asc' } });
+  async list() {
+    return (await this.prisma.user.findMany({ select: publicFields, orderBy: { createdAt: 'asc' } })).map(strip);
   }
 
   async create(dto: CreateUserDto, by: AuthUser) {
@@ -77,14 +83,19 @@ export class UsersService {
       select: publicFields,
     });
     await this.audit.log(by.id, 'CREATE', 'User', user.id, { email, role: dto.role });
-    return user;
+    return strip(user);
   }
 
   async update(id: string, dto: UpdateUserDto, by: AuthUser) {
     if (id === by.id && (dto.isActive === false || (dto.role && dto.role !== 'ADMIN'))) {
       throw new BadRequestException('You cannot disable or demote your own account');
     }
-    const { password, ...rest } = dto;
+    const { password, pin, ...rest } = dto;
+    if (pin) {
+      // Only approvers hold a PIN: the role after this update decides
+      const role = rest.role ?? (await this.prisma.user.findUniqueOrThrow({ where: { id }, select: { role: true } })).role;
+      if (role !== 'ADMIN' && role !== 'MANAGER') throw new BadRequestException('Only managers and the owner can hold an approval PIN');
+    }
     userCache.delete(id);
     const user = await this.prisma.user.update({
       where: { id },
@@ -92,12 +103,14 @@ export class UsersService {
         ...rest,
         ...(rest.branchId !== undefined ? { branchId: rest.branchId || null } : {}),
         ...(password ? { passwordHash: await bcrypt.hash(password, 10) } : {}),
+        // Approval PIN: set with digits, cleared with an empty string
+        ...(pin !== undefined ? { pinHash: pin ? await bcrypt.hash(pin, 10) : null } : {}),
       },
       select: publicFields,
     });
     userCache.delete(id);
-    await this.audit.log(by.id, 'UPDATE', 'User', id, { ...rest, passwordChanged: !!password });
-    return user;
+    await this.audit.log(by.id, 'UPDATE', 'User', id, { ...rest, passwordChanged: !!password, pinChanged: pin !== undefined });
+    return strip(user);
   }
 }
 

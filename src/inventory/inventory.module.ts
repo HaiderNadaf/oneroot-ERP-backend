@@ -12,6 +12,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
+import { ApprovalsService } from '../approvals/approvals.module.js';
 import { AuditService } from '../audit/audit.service.js';
 import { BranchId, CurrentUser, needBranch, Roles, type AuthUser } from '../common/decorators.js';
 import { dateRange, docDate, nextDocNo, num, paged, paging, startOfDay, type Paging } from '../common/utils.js';
@@ -33,6 +34,9 @@ class AdjustmentDto {
   @IsOptional() @IsDateString() expiryDate?: string;
   @IsOptional() @Type(() => Number) @IsNumber() unitCost?: number;
   @IsString() reason: string;
+  /** Manager approval for a value above the user's adjustment limit */
+  @IsOptional() @IsString() approvalId?: string;
+  @IsOptional() @IsString() managerPin?: string;
 }
 
 @Injectable()
@@ -42,6 +46,7 @@ export class InventoryService {
     private readonly stock: StockService,
     private readonly audit: AuditService,
     private readonly posting: PostingService,
+    private readonly approvals: ApprovalsService,
   ) {}
 
   async batches(q: Paging & { productId?: string; status?: string; search?: string; expiry?: string }, branchId: string | null = null) {
@@ -139,8 +144,11 @@ export class InventoryService {
       const ref = { refType: 'ADJUSTMENT', note: dto.reason, userId: user.id };
       const product = await tx.product.findUniqueOrThrow({ where: { id: dto.productId } });
       // Stock written off or added is also booked in the ledger (quantity × cost)
-      const book = (quantity: number, unitCost: number) =>
-        this.posting.postStockAdjustment(tx, { type: dto.type, productName: product.name, quantity, unitCost, reason: dto.reason, date: new Date(), branchId, userId: user.id });
+      let value = 0;
+      const book = (quantity: number, unitCost: number) => {
+        value += quantity * unitCost;
+        return this.posting.postStockAdjustment(tx, { type: dto.type, productName: product.name, quantity, unitCost, reason: dto.reason, date: new Date(), branchId, userId: user.id });
+      };
       let result;
       if (dto.type === 'ADJUSTMENT_IN') {
         const existing = dto.batchId ? await tx.batch.findUnique({ where: { id: dto.batchId } }) : null;
@@ -172,7 +180,14 @@ export class InventoryService {
           await book(dto.quantity, num(batch.costPrice));
         }
       }
-      await this.audit.log(user.id, 'ADJUST', 'Product', dto.productId, { ...dto }, tx);
+      // Above the user's adjustment limit: a manager must approve (the transaction rolls back otherwise)
+      await this.approvals.authorize(tx, user, 'ADJUSTMENT', Math.round(value * 100) / 100, {
+        approvalId: dto.approvalId,
+        pin: dto.managerPin,
+        branchId,
+        details: { product: product.name, type: dto.type, quantity: dto.quantity, reason: dto.reason },
+      });
+      await this.audit.log(user.id, 'ADJUST', 'Product', dto.productId, { ...dto, managerPin: undefined }, tx);
       return result ?? { ok: true };
     }, TX_OPTIONS);
   }
@@ -307,8 +322,8 @@ export class InventoryController {
     return this.inventory.lowStock(branchId);
   }
 
+  // Any role may record one: the role's adjustment limit (Roles & Limits) decides whether a manager must approve
   @Post('adjustments')
-  @Roles('MANAGER')
   adjust(@Body() dto: AdjustmentDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.inventory.adjust(dto, user, needBranch(branchId));
   }

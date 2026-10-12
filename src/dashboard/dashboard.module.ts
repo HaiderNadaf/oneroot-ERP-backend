@@ -122,6 +122,7 @@ export class DashboardService implements OnApplicationBootstrap {
       counts,
       cash,
       govtMismatches,
+      approvalRequests,
     ] = await Promise.all([
       this.prisma.sale.aggregate({ where: curSale, _sum: { totalAmount: true }, _count: true }),
       this.prisma.sale.aggregate({ where: prevSale, _sum: { totalAmount: true } }),
@@ -268,6 +269,7 @@ export class DashboardService implements OnApplicationBootstrap {
       ]),
       this.cash.reconciliation(branchId),
       this.govt.openMismatches(branchId),
+      this.prisma.approvalRequest.count({ where: { status: 'PENDING', branchId: B } }),
     ]);
 
     // Side-by-side figures per branch, shown when looking at all branches
@@ -334,6 +336,7 @@ export class DashboardService implements OnApplicationBootstrap {
         govtMismatches,
         cashGaps: cash.unexplained,
         openShifts: cash.openShifts,
+        approvalRequests,
       },
       cash,
       trend: monthly.map((m) => ({ month: m.month, sales: num(m.sales), purchases: num(m.purchases) })),

@@ -1,5 +1,5 @@
 import { Controller, Get, Injectable, Module, Query } from '@nestjs/common';
-import { BranchId, Roles } from '../common/decorators.js';
+import { BranchId, Can } from '../common/decorators.js';
 import { dateRange, endOfDay, num, parseDay, round2, startOfDay, toDay } from '../common/utils.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -347,7 +347,7 @@ export class ReportsService {
       totals: {
         sales: round2(sales.filter((s) => s.status === 'COMPLETED').reduce((s, x) => s + num(x.totalAmount), 0)),
         purchases: round2(purchases.filter((p) => p.status === 'COMPLETED').reduce((s, x) => s + num(x.totalAmount), 0)),
-        received: round2(payments.filter((p) => p.direction === 'IN').reduce((s, x) => s + num(x.amount), 0)),
+        received: round2(payments.filter((p) => p.direction === 'IN' && p.mode !== 'CREDIT_NOTE').reduce((s, x) => s + num(x.amount), 0)),
         paid: round2(payments.filter((p) => p.direction === 'OUT').reduce((s, x) => s + num(x.amount), 0)),
         expenses: round2(expenses.reduce((s, x) => s + num(x.amount), 0)),
       },
@@ -360,7 +360,7 @@ function roundAll<T extends Record<string, number>>(o: T): T {
 }
 
 @Controller('reports')
-@Roles('MANAGER', 'ACCOUNTANT')
+@Can('reports.view')
 export class ReportsController {
   constructor(private readonly reports: ReportsService) {}
 

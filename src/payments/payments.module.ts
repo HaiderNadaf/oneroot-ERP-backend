@@ -16,7 +16,8 @@ import { Type } from 'class-transformer';
 import { IsDateString, IsEnum, IsIn, IsNumber, IsOptional, IsPositive, IsString } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser, BranchId } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser, BranchId } from '../common/decorators.js';
+import { hasPerm } from '../common/permissions.js';
 import { dateRange, docDate, nextDocNo, num, paged, paging, paymentStatus, round2, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { PaymentMode } from '../generated/prisma/enums.js';
@@ -45,6 +46,8 @@ export interface PaymentInput {
   paymentDate?: Date;
   notes?: string;
   userId?: string;
+  /** Credit available before the current document touched the balance (credit-note payments at billing) */
+  creditBefore?: number;
 }
 
 @Injectable()
@@ -67,8 +70,27 @@ export class PaymentsService {
     return s?.id ?? null;
   }
 
+  /**
+   * Credit notes the customer still holds: returns refunded as credit, less credit notes already applied
+   * to bills. (The balance already nets credit notes against dues, so it cannot tell them apart.)
+   */
+  async availableCredit(tx: Tx, customerId: string) {
+    const [issued, used] = await Promise.all([
+      tx.saleReturn.aggregate({ where: { customerId, refundMode: 'CREDIT' }, _sum: { totalAmount: true } }),
+      tx.payment.aggregate({ where: { customerId, direction: 'IN', mode: 'CREDIT_NOTE' }, _sum: { amount: true } }),
+    ]);
+    return round2(Math.max(0, num(issued._sum.totalAmount) - num(used._sum.amount)));
+  }
+
   /** Money received from a customer (or walk-in at the counter when customerId is null) */
   async receive(tx: Tx, customerId: string | null, saleId: string | null, input: PaymentInput) {
+    const creditNote = input.mode === 'CREDIT_NOTE';
+    if (creditNote) {
+      if (!customerId) throw new BadRequestException('A credit note can only be applied for a registered customer');
+      // `creditBefore` lets a sale that already added its total to the balance pass the pre-sale credit
+      const available = input.creditBefore ?? (await this.availableCredit(tx, customerId));
+      if (input.amount > available + 0.004) throw new BadRequestException(`Only ₹${available} of credit note is available for this customer`);
+    }
     const paymentNo = await nextDocNo(tx, await this.prefix(tx), input.paymentDate);
     const payment = await tx.payment.create({
       data: {
@@ -87,8 +109,11 @@ export class PaymentsService {
         userId: input.userId,
       },
     });
+    // A credit note is already on the customer's balance (the return credited it), so only the bill is marked paid
     const customer = customerId
-      ? await tx.customer.update({ where: { id: customerId }, data: { balance: { decrement: input.amount } } })
+      ? creditNote
+        ? await tx.customer.findUniqueOrThrow({ where: { id: customerId } })
+        : await tx.customer.update({ where: { id: customerId }, data: { balance: { decrement: input.amount } } })
       : null;
     if (saleId) {
       await this.applyToDoc(tx, 'sale', saleId, input.amount);
@@ -197,8 +222,14 @@ export class PaymentsService {
         branchId,
       };
       if (dto.mode === 'CREDIT') throw new BadRequestException('Choose how the money was paid (cash, UPI, ...)');
-      if (dto.partyType === 'VENDOR' && !['ADMIN', 'MANAGER', 'ACCOUNTANT'].includes(user.role)) {
-        throw new ForbiddenException('Only managers and accountants can pay vendors');
+      if ((dto.mode === 'CREDIT_NOTE' || dto.mode === 'KCC') && dto.partyType !== 'CUSTOMER') {
+        throw new BadRequestException('Credit notes and KCC apply to customer receipts only');
+      }
+      if (dto.partyType === 'VENDOR' && !hasPerm(user, 'payments.vendor')) {
+        throw new ForbiddenException('You do not have permission to pay vendors');
+      }
+      if (dto.partyType === 'CUSTOMER' && !hasPerm(user, 'payments.record')) {
+        throw new ForbiddenException('You do not have permission to record customer receipts');
       }
       if (dto.documentId) {
         const doc =
@@ -226,7 +257,7 @@ export class PaymentsService {
       const p = await tx.payment.findUniqueOrThrow({ where: { id } });
       const amount = num(p.amount);
       if (p.direction === 'IN') {
-        if (p.customerId) {
+        if (p.customerId && p.mode !== 'CREDIT_NOTE') {
           await tx.customer.update({ where: { id: p.customerId }, data: { balance: { increment: amount } } });
         }
         if (p.saleId) await this.applyToDoc(tx, 'sale', p.saleId, -amount);
@@ -276,6 +307,7 @@ export class PaymentsService {
 }
 
 @Controller('payments')
+@Can('payments.view')
 export class PaymentsController {
   constructor(private readonly payments: PaymentsService) {}
 
@@ -285,12 +317,13 @@ export class PaymentsController {
   }
 
   @Post()
+  @Can('payments.record', 'payments.vendor')
   create(@Body() dto: CreatePaymentDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.payments.create(dto, user, branchId);
   }
 
   @Delete(':id')
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('payments.delete')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.payments.remove(id, user);
   }

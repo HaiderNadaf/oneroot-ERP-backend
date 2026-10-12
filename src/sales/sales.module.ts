@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Body,
   Controller,
   Delete,
@@ -17,7 +18,9 @@ import {
   IsBoolean,
   IsDateString,
   IsEnum,
+  IsInt,
   IsNumber,
+  IsObject,
   IsOptional,
   IsPositive,
   IsString,
@@ -28,7 +31,8 @@ import {
 import { PostingService } from '../accounting/posting.service.js';
 import { ApprovalsService } from '../approvals/approvals.module.js';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
+import { hasPerm } from '../common/permissions.js';
 import { overdueOf } from '../customers/credit.js';
 import {
   dateRange,
@@ -69,6 +73,21 @@ class SaleItemDto {
   discountPct?: number;
 }
 
+class SalePaymentDto {
+  @IsEnum(PaymentMode) mode: PaymentMode;
+  @Type(() => Number) @IsNumber() @IsPositive() amount: number;
+  @IsOptional() @IsString() reference?: string;
+}
+
+class HoldDto {
+  @IsOptional() @IsString() customerId?: string;
+  @IsOptional() @IsString() customerName?: string;
+  @IsOptional() @IsString() label?: string;
+  @Type(() => Number) @IsNumber() @Min(0) total: number;
+  @Type(() => Number) @IsInt() @Min(1) itemCount: number;
+  @IsObject() payload: Record<string, unknown>;
+}
+
 class CreateSaleDto {
   @IsOptional() @IsString() customerId?: string;
   @IsOptional() @IsString() customerName?: string;
@@ -83,8 +102,10 @@ class CreateSaleDto {
   /** Flat bill discount, spread across lines */
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) discount?: number;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) paidAmount?: number;
-  @IsEnum(PaymentMode) paymentMode: PaymentMode;
+  /** Single payment mode; or give `payments` to split the bill across modes (cash + UPI, credit note + cash…) */
+  @IsOptional() @IsEnum(PaymentMode) paymentMode?: PaymentMode;
   @IsOptional() @IsString() paymentReference?: string;
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => SalePaymentDto) payments?: SalePaymentDto[];
   @IsOptional() @IsBoolean() isInterState?: boolean;
   @IsOptional() @IsBoolean() allowOverCreditLimit?: boolean;
   @IsOptional() @IsString() notes?: string;
@@ -376,14 +397,29 @@ export class SalesService {
         dto.isInterState ??
         (customer ? (gstInterState(customer, settings) ?? false) : false);
 
-      // 3. Payment rules
-      const paid = round2(
-        Math.min(
-          dto.paidAmount ?? (dto.paymentMode === 'CREDIT' ? 0 : totalAmount),
-          totalAmount,
-        ),
-      );
+      // 3. Payment rules — one mode, or a split across modes
+      const creditBefore = customer ? await this.payments.availableCredit(tx, customer.id) : 0;
+      let splits: { mode: PaymentMode; amount: number; reference?: string }[];
+      if (dto.payments?.length) {
+        splits = dto.payments.map((p) => ({ mode: p.mode, amount: round2(p.amount), reference: p.reference }));
+        if (splits.some((p) => p.mode === 'CREDIT')) throw new BadRequestException('Credit is the unpaid part of the bill — leave it out of the payments');
+        const sum = round2(splits.reduce((s, p) => s + p.amount, 0));
+        if (sum > totalAmount + 0.004) throw new BadRequestException(`Payments (₹${sum}) exceed the bill total of ₹${totalAmount}`);
+        const note = round2(splits.filter((p) => p.mode === 'CREDIT_NOTE').reduce((s, p) => s + p.amount, 0));
+        if (note > 0 && !customer) throw new BadRequestException('A credit note can only be applied for a registered customer');
+        if (note > creditBefore + 0.004) throw new BadRequestException(`Only ₹${creditBefore} of credit note is available for ${customer?.name}`);
+      } else {
+        if (!dto.paymentMode) throw new BadRequestException('Choose a payment mode');
+        if (dto.paymentMode === 'CREDIT_NOTE') throw new BadRequestException('Apply a credit note through the split payment');
+        const single = round2(Math.min(dto.paidAmount ?? (dto.paymentMode === 'CREDIT' ? 0 : totalAmount), totalAmount));
+        splits = single > 0 ? [{ mode: dto.paymentMode === 'CREDIT' ? 'CASH' : dto.paymentMode, amount: single, reference: dto.paymentReference }] : [];
+      }
+      const paid = round2(Math.min(splits.reduce((s, p) => s + p.amount, 0), totalAmount));
       const due = round2(totalAmount - paid);
+      // Bill header mode: the single mode, else the largest part of a split, else credit
+      const headerMode: PaymentMode = dto.payments?.length
+        ? (splits.length ? [...splits].sort((a, b) => b.amount - a.amount)[0].mode : 'CREDIT')
+        : dto.paymentMode!;
       if (due > 0 && !customer) {
         throw new BadRequestException(
           'Select a registered customer to sell on credit',
@@ -394,6 +430,9 @@ export class SalesService {
           throw new BadRequestException(
             `Credit is on hold for ${customer.name} — collect the dues first, or ask a manager to lift the hold`,
           );
+        }
+        if (dto.allowOverCreditLimit && !hasPerm(user, 'approvals.decide')) {
+          throw new ForbiddenException('Only an approver can bill beyond the credit limit');
         }
         if (!dto.allowOverCreditLimit) {
           const newBalance = num(customer.balance) + due;
@@ -443,7 +482,7 @@ export class SalesService {
           totalAmount,
           paidAmount: 0,
           costAmount,
-          paymentMode: dto.paymentMode,
+          paymentMode: headerMode,
           paymentStatus: 'UNPAID',
           isInterState,
           offlineId: dto.offlineId || undefined,
@@ -495,15 +534,16 @@ export class SalesService {
           data: { balance: { increment: totalAmount } },
         });
       }
-      if (paid > 0) {
+      for (const p of splits) {
         await this.payments.receive(tx, customer?.id ?? null, sale.id, {
-          amount: paid,
-          mode: dto.paymentMode === 'CREDIT' ? 'CASH' : dto.paymentMode,
-          reference: dto.paymentReference,
+          amount: p.amount,
+          mode: p.mode,
+          reference: p.reference,
           paymentDate: date,
           notes: `Paid at billing ${invoiceNo}`,
           userId: user.id,
           branchId,
+          creditBefore,
         });
       }
 
@@ -515,12 +555,48 @@ export class SalesService {
         { invoiceNo, totalAmount },
         tx,
       );
-      const full = await tx.sale.findUniqueOrThrow({ where: { id: sale.id }, include: { items: true } });
+      const full = await tx.sale.findUniqueOrThrow({ where: { id: sale.id }, include: { items: true, payments: { orderBy: { paymentDate: 'asc' } } } });
       await this.posting.postSale(tx, full);
       return full;
     }, TX_OPTIONS);
     await this.lowStockAlert(dto.items.map((i) => i.productId));
     return sale;
+  }
+
+  // ── Held bills: park a cart, recall it on any counter of the branch ──
+  listHolds(branchId: string) {
+    return this.prisma.heldBill.findMany({
+      where: { branchId },
+      orderBy: { createdAt: 'desc' },
+      include: { user: { select: { name: true } }, customer: { select: { name: true, phone: true } } },
+    });
+  }
+
+  async hold(dto: HoldDto, user: AuthUser, branchId: string) {
+    const last = await this.prisma.heldBill.aggregate({ where: { branchId }, _max: { holdNo: true } });
+    return this.prisma.heldBill.create({
+      data: {
+        holdNo: (last._max.holdNo ?? 0) + 1,
+        branchId,
+        userId: user.id,
+        customerId: dto.customerId || null,
+        customerName: dto.customerName?.trim() || null,
+        label: dto.label?.trim() || null,
+        total: dto.total,
+        itemCount: dto.itemCount,
+        payload: dto.payload as Prisma.InputJsonValue,
+      },
+      include: { user: { select: { name: true } }, customer: { select: { name: true, phone: true } } },
+    });
+  }
+
+  async getHold(id: string) {
+    return this.prisma.heldBill.findUniqueOrThrow({ where: { id }, include: { customer: true } });
+  }
+
+  async removeHold(id: string) {
+    await this.prisma.heldBill.delete({ where: { id } });
+    return { deleted: true };
   }
 
   /** Alert managers once a day when a sale drops a product to its reorder level */
@@ -531,7 +607,7 @@ export class SalesService {
       SELECT id, name, unit, stock FROM "Product"
       WHERE id = ANY(${productIds}) AND "reorderLevel" > 0 AND stock <= "reorderLevel"`;
     for (const p of low) {
-      await this.notifications.toRoles(['MANAGER'], {
+      await this.notifications.toPermitted(['purchases.manage'], {
         type: 'WARNING',
         title: `Low stock: ${p.name}`,
         message: `Only ${Number(p.stock)} ${p.unit} left — reorder soon`,
@@ -554,6 +630,9 @@ export class SalesService {
         throw new BadRequestException(
           'Credit-note refunds need a registered customer',
         );
+      }
+      if (dto.refundMode === 'KCC' || dto.refundMode === 'CREDIT_NOTE') {
+        throw new BadRequestException('Refund in cash / UPI / bank, or as a credit note');
       }
       const saleDue = round2(num(sale.totalAmount) - num(sale.paidAmount));
       if (dto.refundMode !== 'CREDIT' && saleDue > 0) {
@@ -771,6 +850,7 @@ export class SalesService {
 }
 
 @Controller('sales')
+@Can('sales.bill')
 export class SalesController {
   constructor(private readonly sales: SalesService) {}
 
@@ -780,8 +860,29 @@ export class SalesController {
   }
 
   @Get('returns')
+  @Can('sales.returns')
   returns(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.sales.listReturns(q, branchId);
+  }
+
+  @Get('holds')
+  holds(@BranchId() branchId: string | null) {
+    return this.sales.listHolds(needBranch(branchId));
+  }
+
+  @Post('holds')
+  hold(@Body() dto: HoldDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
+    return this.sales.hold(dto, user, needBranch(branchId));
+  }
+
+  @Get('holds/:id')
+  getHold(@Param('id') id: string) {
+    return this.sales.getHold(id);
+  }
+
+  @Delete('holds/:id')
+  removeHold(@Param('id') id: string) {
+    return this.sales.removeHold(id);
   }
 
   @Get(':id')
@@ -795,6 +896,7 @@ export class SalesController {
   }
 
   @Post(':id/returns')
+  @Can('sales.returns')
   createReturn(
     @Param('id') id: string,
     @Body() dto: CreateReturnDto,
@@ -804,7 +906,7 @@ export class SalesController {
   }
 
   @Delete(':id')
-  @Roles('MANAGER')
+  @Can('sales.cancel')
   cancel(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.sales.cancel(id, user);
   }

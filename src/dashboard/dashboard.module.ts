@@ -126,8 +126,8 @@ export class DashboardService implements OnApplicationBootstrap {
     ] = await Promise.all([
       this.prisma.sale.aggregate({ where: curSale, _sum: { totalAmount: true }, _count: true }),
       this.prisma.sale.aggregate({ where: prevSale, _sum: { totalAmount: true } }),
-      this.prisma.payment.aggregate({ where: { direction: 'IN', branchId: B, paymentDate: { gte: r.from, lte: r.to } }, _sum: { amount: true } }),
-      this.prisma.payment.aggregate({ where: { direction: 'IN', branchId: B, paymentDate: { gte: r.prevFrom, lte: r.prevTo } }, _sum: { amount: true } }),
+      this.prisma.payment.aggregate({ where: { direction: 'IN', mode: { not: 'CREDIT_NOTE' }, branchId: B, paymentDate: { gte: r.from, lte: r.to } }, _sum: { amount: true } }),
+      this.prisma.payment.aggregate({ where: { direction: 'IN', mode: { not: 'CREDIT_NOTE' }, branchId: B, paymentDate: { gte: r.prevFrom, lte: r.prevTo } }, _sum: { amount: true } }),
       this.prisma.purchase.aggregate({ where: curPurchase, _sum: { totalAmount: true }, _count: true }),
       this.prisma.purchase.aggregate({ where: prevPurchase, _sum: { totalAmount: true } }),
       branchId

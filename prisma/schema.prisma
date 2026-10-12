@@ -33,6 +33,10 @@ enum PaymentMode {
   BANK
   CHEQUE
   CREDIT
+  /// Kisan Credit Card — settles to the bank
+  KCC
+  /// Customer's credit note / advance applied to the bill (no money moves)
+  CREDIT_NOTE
 }
 
 enum PaymentStatus {
@@ -166,6 +170,8 @@ model User {
   /// Approval PIN (hashed) for managers who sign off counter overrides
   pinHash      String?
   role         Role      @default(CASHIER)
+  /// What this user may do (keys from src/common/permissions.ts); a role only sets the starting ticks
+  permissions  String[]  @default([])
   isActive     Boolean   @default(true)
   lastLoginAt  DateTime?
   createdAt    DateTime  @default(now())
@@ -184,9 +190,26 @@ model User {
   shiftsOpened  Shift[]         @relation("ShiftOpenedBy")
   approvalsAsked    ApprovalRequest[] @relation("ApprovalRequestedBy")
   approvalsDecided  ApprovalRequest[] @relation("ApprovalDecidedBy")
+  heldBills         HeldBill[]
   /// Home branch; staff only see this branch. Empty = can work in every branch
   branchId      String?
   branch        Branch?         @relation(fields: [branchId], references: [id])
+  /// Custom role this user was given (a named set of ticks); role above is its base role
+  roleTemplateId String?
+  roleTemplate   RoleTemplate?  @relation(fields: [roleTemplateId], references: [id])
+}
+
+/// A custom role: a named set of permission ticks built on one of the built-in roles (which still supplies the authority limits)
+model RoleTemplate {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  baseRole    Role
+  permissions String[] @default([])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users User[]
 }
 
 /// A shop or warehouse. Stock, sales and purchases belong to a branch.
@@ -222,6 +245,7 @@ model Branch {
   deposits       BankDeposit[]
   govtMatches    GovtStockMatch[]
   approvals      ApprovalRequest[]
+  heldBills      HeldBill[]
 }
 
 /// Stock moved from one branch to another (batch, expiry and cost travel with it)
@@ -494,6 +518,7 @@ model Customer {
   saleReturns SaleReturn[]
   payments    Payment[]
   reminders   CustomerReminder[]
+  heldBills   HeldBill[]
 
   @@index([name])
 }
@@ -1154,6 +1179,27 @@ model RoleLimit {
 }
 
 /// An override request: who asked, for what, who approved, and when it was used
+/// A POS cart parked while the farmer fetches money / another counter serves them; recalled later on any counter
+model HeldBill {
+  id           String    @id @default(cuid())
+  holdNo       Int
+  branchId     String
+  branch       Branch    @relation(fields: [branchId], references: [id])
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  customerId   String?
+  customer     Customer? @relation(fields: [customerId], references: [id])
+  customerName String?
+  label        String?
+  total        Decimal   @db.Decimal(14, 2)
+  itemCount    Int
+  /// The cart exactly as the POS had it (lines, discount, mode, notes…)
+  payload      Json
+  createdAt    DateTime  @default(now())
+
+  @@index([branchId, createdAt])
+}
+
 model ApprovalRequest {
   id            String         @id @default(cuid())
   kind          ApprovalKind

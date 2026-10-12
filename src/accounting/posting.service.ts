@@ -65,7 +65,7 @@ export interface PostInput {
 }
 
 /** Which asset account money moves through for a payment mode */
-export const modeKey = (mode: PaymentMode): AccountKey => (mode === 'CASH' || mode === 'CREDIT' ? 'CASH' : mode === 'UPI' ? 'UPI' : 'BANK');
+export const modeKey = (mode: PaymentMode): AccountKey => (mode === 'CASH' || mode === 'CREDIT' || mode === 'CREDIT_NOTE' ? 'CASH' : mode === 'UPI' ? 'UPI' : 'BANK');
 
 const ADJUSTMENT_MOVES = ['ADJUSTMENT_IN', 'ADJUSTMENT_OUT', 'EXPIRED', 'DAMAGED'] as const;
 
@@ -326,6 +326,8 @@ export class PostingService implements OnApplicationBootstrap {
   }
 
   async postPayment(tx: Db, p: Prisma.PaymentGetPayload<object>, partyName: string | null) {
+    // A credit note applied to a bill moves no money: the debtor ledger already carries the credit from the return
+    if (p.mode === 'CREDIT_NOTE') return null;
     const amount = num(p.amount);
     const money = modeKey(p.mode);
     const isIn = p.direction === 'IN';

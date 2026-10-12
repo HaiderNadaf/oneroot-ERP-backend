@@ -32,6 +32,7 @@ class UpdateSettingsDto {
   @IsOptional() @IsInt() @Min(0) @Max(90) reminderGraceDays?: number;
   @IsOptional() @IsBoolean() autoReminders?: boolean;
   @IsOptional() @IsBoolean() blockOverdueCredit?: boolean;
+  @IsOptional() @IsBoolean() requireOpenShift?: boolean;
 }
 
 /** WhatsApp Cloud API keys are server-side only; the UI just needs to know whether they exist */

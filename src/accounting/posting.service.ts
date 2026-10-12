@@ -351,6 +351,24 @@ export class PostingService implements OnApplicationBootstrap {
     });
   }
 
+  /** Counter cash banked: money moves from the drawer to the bank */
+  async postDeposit(tx: Db, dep: Prisma.BankDepositGetPayload<object>, shiftNo: string | null) {
+    const amount = num(dep.amount);
+    return this.post(tx, {
+      date: dep.depositDate,
+      refType: 'DEPOSIT',
+      refId: dep.id,
+      refNo: dep.depositNo,
+      narration: `Cash deposited in bank${dep.bankAccount ? ` (${dep.bankAccount})` : ''}${shiftNo ? ` for shift ${shiftNo}` : ''}${dep.reference ? ` ref ${dep.reference}` : ''}`,
+      branchId: dep.branchId,
+      userId: dep.userId,
+      lines: [
+        { key: 'BANK', debit: amount },
+        { key: 'CASH', credit: amount },
+      ],
+    });
+  }
+
   /** Ledger account for an expense category, created under Indirect Expenses on first use */
   async expenseAccount(tx: Db, category: { id: string; name: string }) {
     const found = await tx.account.findUnique({ where: { expenseCategoryId: category.id } });
@@ -522,6 +540,9 @@ export class PostingService implements OnApplicationBootstrap {
 
     const expenses = await p.expense.findMany({ include: { category: true } });
     for (const e of expenses) jobs.push({ date: e.expenseDate, run: () => this.postExpense(p, e, e.category) });
+
+    const deposits = await p.bankDeposit.findMany({ include: { shift: { select: { shiftNo: true } } } });
+    for (const d of deposits) jobs.push({ date: d.depositDate, run: () => this.postDeposit(p, d, d.shift?.shiftNo ?? null) });
 
     const notes = await p.debitNote.findMany({ where: { status: 'SENT', OR: [{ affectsStock: true }, { affectsBalance: true }] }, include: { vendor: true } });
     for (const dn of notes) jobs.push({ date: dn.noteDate, run: () => this.postNote(p, dn, dn.vendor, settings) });

@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Get, Injectable, Module, Param, 
 import { IsBoolean, IsOptional, IsString, Matches } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
 import { branchCache } from '../common/cache.js';
-import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
 import { normalizeGstin } from '../common/gst.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
@@ -117,19 +117,19 @@ export class BranchesController {
   }
 
   @Get()
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('inventory.transfer', 'purchases.view', 'reports.view', 'admin.users', 'admin.branches')
   list() {
     return this.branches.list();
   }
 
   @Post()
-  @Roles('ADMIN')
+  @Can('admin.branches')
   create(@Body() dto: CreateBranchDto, @CurrentUser() user: AuthUser) {
     return this.branches.create(dto, user);
   }
 
   @Patch(':id')
-  @Roles('ADMIN')
+  @Can('admin.branches')
   update(@Param('id') id: string, @Body() dto: UpdateBranchDto, @CurrentUser() user: AuthUser) {
     return this.branches.update(id, dto, user);
   }

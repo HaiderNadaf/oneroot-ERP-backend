@@ -29,7 +29,7 @@ import {
 } from 'class-validator';
 import type { Response } from 'express';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
+import { CurrentUser, AdminOnly, Can, type AuthUser } from '../common/decorators.js';
 import { docDate, endOfDay, num, paged, paging, parseDay, round2, startOfDay, type Paging } from '../common/utils.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { AccountType } from '../generated/prisma/enums.js';
@@ -583,7 +583,7 @@ export class AccountingService {
 }
 
 @Controller('accounting')
-@Roles('MANAGER', 'ACCOUNTANT')
+@Can('accounts.view')
 export class AccountingController {
   constructor(
     private readonly svc: AccountingService,
@@ -602,16 +602,22 @@ export class AccountingController {
   }
 
   @Post('accounts')
+  @Can('accounts.manage')
+  @Can('accounts.manage')
   createAccount(@Body() dto: CreateAccountDto, @CurrentUser() user: AuthUser) {
     return this.svc.createAccount(dto, user);
   }
 
   @Patch('accounts/:id')
+  @Can('accounts.manage')
+  @Can('accounts.manage')
   updateAccount(@Param('id') id: string, @Body() dto: UpdateAccountDto, @CurrentUser() user: AuthUser) {
     return this.svc.updateAccount(id, dto, user);
   }
 
   @Delete('accounts/:id')
+  @Can('accounts.manage')
+  @Can('accounts.manage')
   deleteAccount(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.svc.deleteAccount(id, user);
   }
@@ -652,11 +658,15 @@ export class AccountingController {
   }
 
   @Post('entries')
+  @Can('accounts.manage')
+  @Can('accounts.manage')
   createManual(@Body() dto: ManualEntryDto, @CurrentUser() user: AuthUser) {
     return this.svc.createManual(dto, user, null);
   }
 
   @Delete('entries/:id')
+  @Can('accounts.manage')
+  @Can('accounts.manage')
   deleteManual(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.svc.deleteManual(id, user);
   }
@@ -680,7 +690,7 @@ export class AccountingController {
 
   /** Re-posts the whole ledger from the documents (first-time setup or after a data fix) */
   @Post('rebuild')
-  @Roles('ADMIN')
+  @AdminOnly()
   async rebuild(@CurrentUser() user: AuthUser) {
     const result = await this.posting.rebuild(user.id);
     await this.audit.log(user.id, 'REBUILD', 'Ledger', undefined, result);

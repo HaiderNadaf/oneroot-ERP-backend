@@ -15,7 +15,7 @@ import {
 import { Type } from 'class-transformer';
 import { ArrayMinSize, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
 import { num, parseDay, round2, round3, toDay } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { SchemeType } from '../generated/prisma/enums.js';
@@ -288,19 +288,19 @@ export class SchemesController {
   }
 
   @Post()
-  @Roles('MANAGER')
+  @Can('admin.schemes')
   create(@Body() dto: SchemeDto, @CurrentUser() user: AuthUser) {
     return this.pricing.createScheme(dto, user);
   }
 
   @Patch(':id')
-  @Roles('MANAGER')
+  @Can('admin.schemes')
   update(@Param('id') id: string, @Body() dto: SchemeDto, @CurrentUser() user: AuthUser) {
     return this.pricing.updateScheme(id, dto, user);
   }
 
   @Delete(':id')
-  @Roles('MANAGER')
+  @Can('admin.schemes')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.pricing.deleteScheme(id, user);
   }
@@ -316,19 +316,19 @@ export class CustomerTypesController {
   }
 
   @Post()
-  @Roles('MANAGER')
+  @Can('admin.schemes')
   create(@Body() dto: CustomerTypeDto, @CurrentUser() user: AuthUser) {
     return this.pricing.createType(dto, user);
   }
 
   @Patch(':id')
-  @Roles('MANAGER')
+  @Can('admin.schemes')
   update(@Param('id') id: string, @Body() dto: Partial<CustomerTypeDto>, @CurrentUser() user: AuthUser) {
     return this.pricing.updateType(id, dto, user);
   }
 
   @Delete(':id')
-  @Roles('MANAGER')
+  @Can('admin.schemes')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.pricing.deleteType(id, user);
   }

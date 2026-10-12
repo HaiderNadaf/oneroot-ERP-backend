@@ -2,7 +2,7 @@ import { Body, Controller, Get, Injectable, Module, Param, Patch, Post, Put, Que
 import { Type } from 'class-transformer';
 import { ArrayMaxSize, IsArray, IsDateString, IsNumber, IsOptional, IsString, Min, ValidateNested } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
-import { BranchId, CurrentUser, needBranch, Roles, type AuthUser } from '../common/decorators.js';
+import { BranchId, CurrentUser, needBranch, Can, type AuthUser } from '../common/decorators.js';
 import { endOfDay, num, parseDay, round3, startOfDay, toDay } from '../common/utils.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
@@ -138,7 +138,7 @@ export class GovtService {
 }
 
 @Controller('govt-fertiliser')
-@Roles('MANAGER', 'ACCOUNTANT')
+@Can('inventory.govt')
 export class GovtController {
   constructor(private readonly govt: GovtService) {}
 

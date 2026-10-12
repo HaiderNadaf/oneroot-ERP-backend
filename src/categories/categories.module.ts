@@ -12,7 +12,7 @@ import {
   Post,
 } from '@nestjs/common';
 import { IsOptional, IsString } from 'class-validator';
-import { Roles } from '../common/decorators.js';
+import { Can } from '../common/decorators.js';
 import { CODE_PATTERN, uniqueCode } from '../common/sku.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
@@ -63,14 +63,14 @@ export class CategoriesController {
   }
 
   @Post()
-  @Roles('MANAGER')
+  @Can('products.manage')
   async create(@Body() dto: CategoryDto) {
     const code = dto.code ? await checkCode(this.prisma, dto.code) : await uniqueCode(this.prisma, dto.name);
     return this.prisma.category.create({ data: { ...dto, code } });
   }
 
   @Patch(':id')
-  @Roles('MANAGER')
+  @Can('products.manage')
   async update(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
     // Changing the code only affects new products; existing SKUs stay as they are
     const code = dto.code ? await checkCode(this.prisma, dto.code, id) : undefined;
@@ -78,7 +78,7 @@ export class CategoriesController {
   }
 
   @Delete(':id')
-  @Roles('MANAGER')
+  @Can('products.manage')
   async remove(@Param('id') id: string) {
     if (await this.prisma.product.count({ where: { categoryId: id } })) {
       throw new BadRequestException('Category has products — move them first');
@@ -97,13 +97,13 @@ export class ExpenseCategoriesController {
   }
 
   @Post()
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('expenses')
   create(@Body() dto: CategoryDto) {
     return this.prisma.expenseCategory.create({ data: { name: dto.name } });
   }
 
   @Delete(':id')
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('expenses')
   async remove(@Param('id') id: string) {
     if (await this.prisma.expense.count({ where: { categoryId: id } })) {
       throw new BadRequestException('Category has expenses recorded against it');

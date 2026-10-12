@@ -15,7 +15,7 @@ import {
 import { Type } from 'class-transformer';
 import { IsEnum, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
 import { num, round2, startOfDay, toDay } from '../common/utils.js';
 import { ReminderChannel } from '../generated/prisma/enums.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
@@ -266,7 +266,7 @@ export class RemindersService implements OnApplicationBootstrap, OnModuleDestroy
     try {
       const { rows, total } = await this.overdueCustomers({});
       if (rows.length) {
-        await this.notifications.toRoles(['MANAGER', 'CASHIER'], {
+        await this.notifications.toPermitted(['customers.remind', 'customers.manage'], {
           type: 'WARNING',
           title: `${rows.length} customer${rows.length > 1 ? 's are' : ' is'} overdue — ₹${Math.round(total).toLocaleString('en-IN')}`,
           message: rows
@@ -290,6 +290,8 @@ export class RemindersService implements OnApplicationBootstrap, OnModuleDestroy
 }
 
 @Controller('reminders')
+@Can('customers.view')
+@Can('customers.view')
 export class RemindersController {
   constructor(private readonly reminders: RemindersService) {}
 
@@ -304,17 +306,21 @@ export class RemindersController {
   }
 
   @Post('customers/:id')
+  @Can('customers.manage')
+  @Can('customers.manage')
   log(@Param('id') id: string, @Body() dto: LogReminderDto, @CurrentUser() user: AuthUser) {
     return this.reminders.log(id, dto, user);
   }
 
   @Post('customers/:id/send')
+  @Can('customers.manage')
+  @Can('customers.manage')
   send(@Param('id') id: string, @Body() dto: SendReminderDto, @CurrentUser() user: AuthUser) {
     return this.reminders.send(id, dto, user);
   }
 
   @Post('run')
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('customers.remind')
   run(@CurrentUser() user: AuthUser) {
     return this.reminders.runAuto(user);
   }

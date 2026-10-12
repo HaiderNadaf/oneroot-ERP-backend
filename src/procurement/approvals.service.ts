@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import type { AuthUser } from '../common/decorators.js';
+import { hasPerm } from '../common/permissions.js';
 import { TtlCache } from '../common/cache.js';
 import { num } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
@@ -97,11 +98,11 @@ export class ApprovalsService {
     }));
   }
 
-  /** Admins can act for any step; an unassigned step falls to managers */
+  /** Admins can act for any step; an unassigned step falls to anyone who may approve POs */
   canAct(user: AuthUser, step: ChainStep | undefined) {
     if (!step) return false;
     if (user.role === 'ADMIN') return true;
-    return step.approverId ? step.approverId === user.id : user.role === 'MANAGER';
+    return step.approverId ? step.approverId === user.id : hasPerm(user, 'purchases.approve');
   }
 
   /** Tell whoever must approve this step */
@@ -109,6 +110,6 @@ export class ApprovalsService {
     if (!step) return;
     return step.approverId
       ? this.notifications.toUsers([step.approverId], input, db)
-      : this.notifications.toRoles(['MANAGER'], input, db);
+      : this.notifications.toPermitted(['purchases.approve'], input, db);
   }
 }

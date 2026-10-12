@@ -49,7 +49,7 @@ export class TtlCache<K, V> {
 /** Signed-in users, looked up on every request by the auth guard */
 export const userCache = new TtlCache<
   string,
-  { id: string; email: string; name: string; role: string; isActive: boolean; branchId: string | null } | null
+  { id: string; email: string; name: string; role: string; permissions: string[]; isActive: boolean; branchId: string | null; roleTemplate: { name: string } | null } | null
 >(30_000);
 
 /** Active branch ids, to validate the X-Branch-Id header cheaply */

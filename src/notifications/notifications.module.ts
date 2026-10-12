@@ -15,7 +15,8 @@ import {
 import { CurrentUser, type AuthUser } from '../common/decorators.js';
 import { paged, paging, startOfDay, toDay, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
-import type { NotificationType, Role } from '../generated/prisma/enums.js';
+import type { NotificationType } from '../generated/prisma/enums.js';
+import { permittedWhere, type Permission } from '../common/permissions.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
 type Db = PrismaService | Prisma.TransactionClient;
@@ -50,12 +51,9 @@ export class NotificationsService implements OnApplicationBootstrap, OnModuleDes
     });
   }
 
-  /** Send to every active user with one of the roles. Admins always receive it. */
-  async toRoles(roles: Role[], input: NotifyInput, db: Db = this.prisma, extraUserIds: (string | null | undefined)[] = []) {
-    const users = await db.user.findMany({
-      where: { isActive: true, role: { in: [...new Set<Role>(['ADMIN', ...roles])] } },
-      select: { id: true },
-    });
+  /** Send to every active user who holds one of the permissions. Admins always receive it. */
+  async toPermitted(perms: Permission[], input: NotifyInput, db: Db = this.prisma, extraUserIds: (string | null | undefined)[] = []) {
+    const users = await db.user.findMany({ where: permittedWhere(perms), select: { id: true } });
     await this.toUsers([...users.map((u) => u.id), ...extraUserIds], input, db);
   }
 
@@ -123,7 +121,7 @@ export class NotificationsService implements OnApplicationBootstrap, OnModuleDes
       ]);
 
       if (lowStock.length) {
-        await this.toRoles(['MANAGER'], {
+        await this.toPermitted(['purchases.manage'], {
           type: 'WARNING',
           title: `${lowStock.length} product${lowStock.length > 1 ? 's are' : ' is'} at or below reorder level`,
           message: lowStock
@@ -136,7 +134,7 @@ export class NotificationsService implements OnApplicationBootstrap, OnModuleDes
         });
       }
       if (expiring.length) {
-        await this.toRoles(['MANAGER'], {
+        await this.toPermitted(['inventory.adjust'], {
           type: 'WARNING',
           title: `${expiring.length} batch${expiring.length > 1 ? 'es expire' : ' expires'} within ${settings?.expiryAlertDays ?? 60} days`,
           message: expiring
@@ -149,7 +147,7 @@ export class NotificationsService implements OnApplicationBootstrap, OnModuleDes
         });
       }
       if (expired.length) {
-        await this.toRoles(['MANAGER'], {
+        await this.toPermitted(['inventory.adjust'], {
           type: 'DANGER',
           title: `${expired.length} expired batch${expired.length > 1 ? 'es are' : ' is'} still in stock`,
           message: 'Write them off or return them to the vendor so they are not sold.',
@@ -160,7 +158,7 @@ export class NotificationsService implements OnApplicationBootstrap, OnModuleDes
       }
       if (overdue.length) {
         const total = overdue.reduce((s, p) => s + Number(p.totalAmount) - Number(p.paidAmount), 0);
-        await this.toRoles(['ACCOUNTANT'], {
+        await this.toPermitted(['payments.vendor'], {
           type: 'WARNING',
           title: `${overdue.length} vendor bill${overdue.length > 1 ? 's are' : ' is'} overdue`,
           message: `₹${Math.round(total).toLocaleString('en-IN')} past due date`,

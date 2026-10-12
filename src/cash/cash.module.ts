@@ -17,7 +17,8 @@ import { Type } from 'class-transformer';
 import { IsDateString, IsNumber, IsObject, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { BranchId, CurrentUser, needBranch, Roles, type AuthUser } from '../common/decorators.js';
+import { BranchId, CurrentUser, needBranch, AdminOnly, Can, type AuthUser } from '../common/decorators.js';
+import { hasPerm } from '../common/permissions.js';
 import { dateRange, docDate, nextDocNo, num, paged, paging, round2, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
@@ -125,7 +126,7 @@ export class CashService {
     return this.prisma.$transaction(async (tx) => {
       const shift = await tx.shift.findUniqueOrThrow({ where: { id } });
       if (shift.status !== 'OPEN') throw new BadRequestException('Shift is already closed');
-      if (shift.openedById !== user.id && !['ADMIN', 'MANAGER'].includes(user.role)) {
+      if (shift.openedById !== user.id && !hasPerm(user, 'cash.manage')) {
         throw new ForbiddenException('Only the cashier who opened the shift, or a manager, can close it');
       }
       const b = await this.breakdown(tx, shift);
@@ -308,6 +309,8 @@ export class CashService {
 }
 
 @Controller('shifts')
+@Can('cash.shifts')
+@Can('cash.shifts')
 export class ShiftsController {
   constructor(private readonly cash: CashService) {}
 
@@ -322,7 +325,7 @@ export class ShiftsController {
   }
 
   @Get('reconciliation')
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('cash.manage')
   reconciliation(@BranchId() branchId: string | null, @Query('days') days?: string) {
     return this.cash.reconciliation(branchId, Number(days) || 14);
   }
@@ -344,7 +347,7 @@ export class ShiftsController {
 }
 
 @Controller('deposits')
-@Roles('MANAGER', 'ACCOUNTANT')
+@Can('cash.manage')
 export class DepositsController {
   constructor(private readonly cash: CashService) {}
 
@@ -364,13 +367,12 @@ export class DepositsController {
   }
 
   @Patch(':id/resolve')
-  @Roles('ADMIN')
+  @AdminOnly()
   resolve(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.cash.resolve(id, user);
   }
 
   @Delete(':id')
-  @Roles('MANAGER')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.cash.removeDeposit(id, user);
   }

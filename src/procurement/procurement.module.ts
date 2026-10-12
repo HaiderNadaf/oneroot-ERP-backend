@@ -30,7 +30,7 @@ import {
 } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
 import {
   docDate,
   nextDocNo,
@@ -639,8 +639,8 @@ export class ProcurementService {
             where: { id },
             data: { status: 'APPROVED', level },
           });
-          await this.notifications.toRoles(
-            ['MANAGER'],
+          await this.notifications.toPermitted(
+            ['purchases.receive'],
             {
               type: 'SUCCESS',
               title: `${po.poNo} fully approved — ready for goods inward`,
@@ -1074,8 +1074,8 @@ export class ProcurementService {
             items: { create: lines.map(({ subtotal: _s, ...l }) => l) },
           },
         });
-        await this.notifications.toRoles(
-          ['MANAGER', 'ACCOUNTANT'],
+        await this.notifications.toPermitted(
+          ['purchases.manage'],
           {
             type: 'INFO',
             title: `${grnNo}: rejected goods moved to debit note ${dn.dnNo}`,
@@ -1085,8 +1085,8 @@ export class ProcurementService {
           tx,
         );
       }
-      await this.notifications.toRoles(
-        ['ACCOUNTANT'],
+      await this.notifications.toPermitted(
+        ['purchases.manage'],
         {
           type: 'SUCCESS',
           title: `${grnNo} posted — book the purchase invoice`,
@@ -1251,8 +1251,8 @@ export class ProcurementService {
         });
       }
       if (rateMismatch) {
-        await this.notifications.toRoles(
-          ['MANAGER'],
+        await this.notifications.toPermitted(
+          ['purchases.manage'],
           {
             type: 'WARNING',
             title: `${purchaseNo}: invoice rate differs from ${grn.po.poNo}`,
@@ -1554,7 +1554,7 @@ export class PurchaseOrdersController {
   constructor(private readonly svc: ProcurementService) {}
 
   @Get()
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('purchases.view')
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.svc.listPos(q, branchId);
   }
@@ -1576,13 +1576,13 @@ export class PurchaseOrdersController {
   }
 
   @Post()
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('purchases.manage')
   create(@Body() dto: SavePoDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.svc.savePo(null, dto, user, branchId);
   }
 
   @Put(':id')
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('purchases.manage')
   update(
     @Param('id') id: string,
     @Body() dto: SavePoDto,
@@ -1602,13 +1602,13 @@ export class PurchaseOrdersController {
   }
 
   @Post(':id/cancel')
-  @Roles('MANAGER')
+  @Can('purchases.cancel')
   cancel(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.svc.cancelPo(id, user);
   }
 
   @Post(':id/grn')
-  @Roles('MANAGER')
+  @Can('purchases.receive')
   receive(
     @Param('id') id: string,
     @Body() dto: CreateGrnDto,
@@ -1620,7 +1620,7 @@ export class PurchaseOrdersController {
 }
 
 @Controller('grns')
-@Roles('MANAGER', 'ACCOUNTANT')
+@Can('purchases.view')
 export class GrnsController {
   constructor(private readonly svc: ProcurementService) {}
 
@@ -1640,6 +1640,7 @@ export class GrnsController {
   }
 
   @Post(':id/invoice')
+  @Can('purchases.manage')
   book(
     @Param('id') id: string,
     @Body() dto: BookInvoiceDto,
@@ -1650,7 +1651,7 @@ export class GrnsController {
 }
 
 @Controller('debit-notes')
-@Roles('MANAGER', 'ACCOUNTANT')
+@Can('purchases.view')
 export class DebitNotesController {
   constructor(private readonly svc: ProcurementService) {}
 
@@ -1660,16 +1661,19 @@ export class DebitNotesController {
   }
 
   @Post()
+  @Can('purchases.manage')
   create(@Body() dto: CreateDebitNoteDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.svc.createDebitNote(dto, user, branchId);
   }
 
   @Post(':id/send')
+  @Can('purchases.manage')
   send(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.svc.sendDebitNote(id, user);
   }
 
   @Post(':id/cancel')
+  @Can('purchases.manage')
   cancel(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.svc.cancelDebitNote(id, user);
   }
@@ -1685,7 +1689,7 @@ export class ApprovalRulesController {
   }
 
   @Put()
-  @Roles('ADMIN')
+  @Can('admin.approval_rules')
   update(@Body() dto: ApprovalConfigDto) {
     return this.approvals.updateConfig(dto);
   }

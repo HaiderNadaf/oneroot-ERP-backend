@@ -18,7 +18,8 @@ import { Type } from 'class-transformer';
 import { IsBoolean, IsEnum, IsIn, IsNumber, IsObject, IsOptional, IsString, Matches, Min } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
 import { TtlCache } from '../common/cache.js';
-import { BranchId, CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
+import { BranchId, CurrentUser, Can, type AuthUser } from '../common/decorators.js';
+import { hasPerm, permittedWhere } from '../common/permissions.js';
 import { num, paged, paging, round2, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { ApprovalKind, Role } from '../generated/prisma/enums.js';
@@ -149,10 +150,10 @@ export class ApprovalsService implements OnApplicationBootstrap {
     return kind === 'DISCOUNT' ? l.maxDiscountPct : kind === 'RETURN' ? l.returnLimit : kind === 'ADJUSTMENT' ? l.adjustmentLimit : 0;
   }
 
-  /** The manager (or owner) whose PIN this is, if any */
+  /** The approver whose PIN this is, if any */
   async verifyPin(pin: string) {
     const candidates = await this.prisma.user.findMany({
-      where: { isActive: true, role: { in: ['ADMIN', 'MANAGER'] }, pinHash: { not: null } },
+      where: { ...permittedWhere(['approvals.decide']), pinHash: { not: null } },
       select: { id: true, name: true, role: true, pinHash: true },
     });
     for (const c of candidates) {
@@ -224,7 +225,7 @@ export class ApprovalsService implements OnApplicationBootstrap {
     const req = await this.prisma.approvalRequest.create({
       data: { kind: dto.kind, amount: dto.amount, details: (dto.details ?? {}) as Prisma.InputJsonValue, reason: dto.reason?.trim() || null, requestedById: user.id, branchId },
     });
-    await this.notifications.toRoles(['MANAGER'], {
+    await this.notifications.toPermitted(['approvals.decide'], {
       type: 'WARNING',
       title: `${user.name} asks for a ${KIND_LABEL[dto.kind]}${dto.kind === 'DISCOUNT' ? ` of ${dto.amount}%` : ` of ₹${dto.amount}`}`,
       message: dto.reason ?? undefined,
@@ -263,7 +264,7 @@ export class ApprovalsService implements OnApplicationBootstrap {
 
   async list(user: AuthUser, q: Paging & { status?: string; mine?: string }, branchId: string | null) {
     const p = paging(q);
-    const manager = user.role === 'ADMIN' || user.role === 'MANAGER';
+    const manager = hasPerm(user, 'approvals.decide');
     const where: Prisma.ApprovalRequestWhereInput = {
       ...(manager && q.mine !== 'true' ? { branchId: branchId ?? undefined } : { requestedById: user.id }),
       status: q.status === 'PENDING' || q.status === 'APPROVED' || q.status === 'REJECTED' || q.status === 'USED' ? q.status : undefined,
@@ -284,7 +285,7 @@ export class ApprovalsService implements OnApplicationBootstrap {
 
   get(id: string, user: AuthUser) {
     return this.prisma.approvalRequest.findFirstOrThrow({
-      where: { id, ...(user.role === 'ADMIN' || user.role === 'MANAGER' ? {} : { requestedById: user.id }) },
+      where: { id, ...(hasPerm(user, 'approvals.decide') ? {} : { requestedById: user.id }) },
       include: { requestedBy: { select: { name: true } }, decidedBy: { select: { name: true } } },
     });
   }
@@ -334,7 +335,7 @@ export class RolesController {
   }
 
   @Put('limits/:role')
-  @Roles('ADMIN')
+  @Can('admin.roles')
   update(@Param('role') role: string, @Body() dto: LimitDto, @CurrentUser() user: AuthUser) {
     if (!(role in DEFAULT_LIMITS)) throw new BadRequestException('Unknown role');
     return this.approvals.updateLimit(role as Role, dto, user);
@@ -366,7 +367,7 @@ export class ApprovalsController {
   }
 
   @Post(':id/decide')
-  @Roles('MANAGER')
+  @Can('approvals.decide')
   decide(@Param('id') id: string, @Body() dto: DecideDto, @CurrentUser() user: AuthUser) {
     return this.approvals.decide(id, dto, user);
   }

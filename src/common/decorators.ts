@@ -1,11 +1,16 @@
 import { BadRequestException, createParamDecorator, ExecutionContext, SetMetadata } from '@nestjs/common';
 import type { Role } from '../generated/prisma/enums.js';
+import type { Permission } from './permissions.js';
 
 export interface AuthUser {
   id: string;
   email: string;
   name: string;
   role: Role;
+  /** What this user may do (see permissions.ts); administrators may do everything */
+  permissions: string[];
+  /** Custom role name, when the user was given one */
+  roleTemplate?: { name: string } | null;
   /** Home branch; null = may work in every branch */
   branchId: string | null;
 }
@@ -14,9 +19,13 @@ export const IS_PUBLIC_KEY = 'isPublic';
 /** Skip JWT auth for this route */
 export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
 
-export const ROLES_KEY = 'roles';
-/** Restrict a route to the given roles (ADMIN always passes) */
-export const Roles = (...roles: Role[]) => SetMetadata(ROLES_KEY, roles);
+export const PERMS_KEY = 'perms';
+/** Restrict a route to users holding any of these permissions (ADMIN always passes). A method-level Can replaces the controller's. */
+export const Can = (...perms: Permission[]) => SetMetadata(PERMS_KEY, perms);
+
+export const ADMIN_ONLY_KEY = 'adminOnly';
+/** Owner-only actions that cannot be delegated by ticking a permission */
+export const AdminOnly = () => SetMetadata(ADMIN_ONLY_KEY, true);
 
 export const CurrentUser = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext): AuthUser => ctx.switchToHttp().getRequest().user,

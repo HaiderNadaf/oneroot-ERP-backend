@@ -27,6 +27,7 @@ import { ReportsModule } from './reports/reports.module.js';
 import { SalesModule } from './sales/sales.module.js';
 import { SettingsModule } from './settings/settings.module.js';
 import { UsersModule } from './users/users.module.js';
+import { RolesModule } from './roles/roles.module.js';
 import { VendorsModule } from './vendors/vendors.module.js';
 
 @Module({
@@ -50,6 +51,7 @@ import { VendorsModule } from './vendors/vendors.module.js';
     AuthModule,
     BranchesModule,
     UsersModule,
+    RolesModule,
     SettingsModule,
     CategoriesModule,
     ProductsModule,

@@ -7,10 +7,10 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
-import type { Role } from '../generated/prisma/enums.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { branchCache, userCache } from './cache.js';
-import { IS_PUBLIC_KEY, ROLES_KEY } from './decorators.js';
+import { ADMIN_ONLY_KEY, IS_PUBLIC_KEY, PERMS_KEY } from './decorators.js';
+import { hasPerm, type Permission } from './permissions.js';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -39,7 +39,7 @@ export class AuthGuard implements CanActivate {
     const user = await userCache.getOrLoad(payload.sub, () =>
       this.prisma.user.findUnique({
         where: { id: payload.sub },
-        select: { id: true, email: true, name: true, role: true, isActive: true, branchId: true },
+        select: { id: true, email: true, name: true, role: true, permissions: true, isActive: true, branchId: true, roleTemplate: { select: { name: true } } },
       }),
     );
     if (!user || !user.isActive) throw new UnauthorizedException('Account disabled');
@@ -61,8 +61,11 @@ export class AuthGuard implements CanActivate {
       }
     }
 
-    const roles = this.reflector.getAllAndOverride<Role[]>(ROLES_KEY, targets);
-    if (roles?.length && user.role !== 'ADMIN' && !roles.includes(user.role as Role)) {
+    if (this.reflector.getAllAndOverride<boolean>(ADMIN_ONLY_KEY, targets) && user.role !== 'ADMIN') {
+      throw new ForbiddenException('Only the owner / administrator can do this');
+    }
+    const perms = this.reflector.getAllAndOverride<Permission[]>(PERMS_KEY, targets);
+    if (perms?.length && !hasPerm(user, ...perms)) {
       throw new ForbiddenException('You do not have permission for this action');
     }
     return true;

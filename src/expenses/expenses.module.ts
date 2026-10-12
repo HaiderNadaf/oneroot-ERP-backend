@@ -3,7 +3,7 @@ import { Type } from 'class-transformer';
 import { IsDateString, IsEnum, IsNumber, IsOptional, IsPositive, IsString } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser, BranchId } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser, BranchId } from '../common/decorators.js';
 import { dateRange, docDate, paged, paging, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { PaymentMode } from '../generated/prisma/enums.js';
@@ -73,7 +73,7 @@ export class ExpensesService {
 }
 
 @Controller('expenses')
-@Roles('MANAGER', 'ACCOUNTANT')
+@Can('expenses')
 export class ExpensesController {
   constructor(private readonly expenses: ExpensesService) {}
 

@@ -18,7 +18,7 @@ import { IsBoolean, IsEmail, IsInt, IsNumber, IsOptional, IsString, Min } from '
 import { ValidateIf } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
 import { num, paged, paging, round2, type Paging } from '../common/utils.js';
 import { GST_STATES, normalizeGstin, stateFromGstin } from '../common/gst.js';
 import { buildLedger, type LedgerEntry } from '../customers/customers.module.js';
@@ -222,6 +222,7 @@ export class GstStateBackfill implements OnApplicationBootstrap {
 }
 
 @Controller('vendors')
+@Can('vendors.view')
 export class VendorsController {
   constructor(private readonly vendors: VendorsService) {}
 
@@ -241,19 +242,19 @@ export class VendorsController {
   }
 
   @Post()
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('vendors.manage')
   create(@Body() dto: CreateVendorDto, @CurrentUser() user: AuthUser) {
     return this.vendors.create(dto, user);
   }
 
   @Patch(':id')
-  @Roles('MANAGER', 'ACCOUNTANT')
+  @Can('vendors.manage')
   update(@Param('id') id: string, @Body() dto: UpdateVendorDto, @CurrentUser() user: AuthUser) {
     return this.vendors.update(id, dto, user);
   }
 
   @Delete(':id')
-  @Roles('MANAGER')
+  @Can('vendors.delete')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.vendors.remove(id, user);
   }

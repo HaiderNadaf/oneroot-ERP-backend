@@ -14,7 +14,8 @@ import {
 import { PostingService } from '../accounting/posting.service.js';
 import { ApprovalsService } from '../approvals/approvals.module.js';
 import { AuditService } from '../audit/audit.service.js';
-import { BranchId, CurrentUser, needBranch, Roles, type AuthUser } from '../common/decorators.js';
+import { BranchId, CurrentUser, needBranch, Can, type AuthUser } from '../common/decorators.js';
+import { permittedWhere } from '../common/permissions.js';
 import { dateRange, docDate, nextDocNo, num, paged, paging, startOfDay, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import type { StockMovementType } from '../generated/prisma/enums.js';
@@ -275,7 +276,7 @@ export class TransfersService {
           },
         });
       }
-      const staff = await tx.user.findMany({ where: { branchId: to.id, isActive: true, role: { in: ['MANAGER', 'ADMIN'] } }, select: { id: true } });
+      const staff = await tx.user.findMany({ where: { branchId: to.id, ...permittedWhere(['inventory.transfer']) }, select: { id: true } });
       await this.notifications.toUsers(
         staff.map((u) => u.id),
         { type: 'INFO', title: `${transferNo}: ${dto.items.length} item(s) transferred to ${to.name}`, module: 'Stock', link: '/inventory?tab=transfers' },
@@ -288,6 +289,7 @@ export class TransfersService {
 }
 
 @Controller('stock-transfers')
+@Can('inventory.view')
 export class TransfersController {
   constructor(private readonly transfers: TransfersService) {}
 
@@ -297,13 +299,14 @@ export class TransfersController {
   }
 
   @Post()
-  @Roles('MANAGER')
+  @Can('inventory.transfer')
   create(@Body() dto: CreateTransferDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.transfers.create(dto, user, needBranch(branchId));
   }
 }
 
 @Controller('inventory')
+@Can('inventory.view')
 export class InventoryController {
   constructor(private readonly inventory: InventoryService) {}
 
@@ -322,8 +325,9 @@ export class InventoryController {
     return this.inventory.lowStock(branchId);
   }
 
-  // Any role may record one: the role's adjustment limit (Roles & Limits) decides whether a manager must approve
+  // The role's adjustment limit (Roles & Limits) decides whether an approver must sign off
   @Post('adjustments')
+  @Can('inventory.adjust')
   adjust(@Body() dto: AdjustmentDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.inventory.adjust(dto, user, needBranch(branchId));
   }

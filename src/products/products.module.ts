@@ -27,7 +27,7 @@ import {
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { storeBarcode } from '../common/barcode.js';
-import { CurrentUser, Roles, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
 import { nextSku, peekSku, skuPrefix } from '../common/sku.js';
 import { paged, paging, startOfDay, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
@@ -309,6 +309,7 @@ export class ProductsService {
 }
 
 @Controller('products')
+@Can('products.view')
 export class ProductsController {
   constructor(private readonly products: ProductsService) {}
 
@@ -328,31 +329,31 @@ export class ProductsController {
   }
 
   @Post()
-  @Roles('MANAGER')
+  @Can('products.manage')
   create(@Body() dto: CreateProductDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.products.create(dto, user, branchId);
   }
 
   @Post('barcodes/generate-missing')
-  @Roles('MANAGER')
+  @Can('products.manage')
   generateMissing(@CurrentUser() user: AuthUser) {
     return this.products.generateMissingBarcodes(user);
   }
 
   @Post(':id/barcode')
-  @Roles('MANAGER')
+  @Can('products.manage')
   generateBarcode(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.products.generateBarcode(id, user);
   }
 
   @Patch(':id')
-  @Roles('MANAGER')
+  @Can('products.manage')
   update(@Param('id') id: string, @Body() dto: UpdateProductDto, @CurrentUser() user: AuthUser) {
     return this.products.update(id, dto, user);
   }
 
   @Delete(':id')
-  @Roles('MANAGER')
+  @Can('products.manage')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.products.remove(id, user);
   }

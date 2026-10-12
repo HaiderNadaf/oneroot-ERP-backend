@@ -61,14 +61,14 @@ export class AuthService implements OnApplicationBootstrap {
   }
 
   async login(dto: LoginDto) {
-    const user = await this.prisma.user.findUnique({ where: { email: dto.email.toLowerCase() } });
+    const user = await this.prisma.user.findUnique({ where: { email: dto.email.toLowerCase() }, include: { roleTemplate: { select: { name: true } } } });
     if (!user || !user.isActive || !(await bcrypt.compare(dto.password, user.passwordHash))) {
       throw new UnauthorizedException('Invalid email or password');
     }
     await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
     await this.audit.log(user.id, 'LOGIN', 'User', user.id);
     const token = await this.jwt.signAsync({ sub: user.id, role: user.role });
-    return { token, user: { id: user.id, name: user.name, email: user.email, role: user.role, branchId: user.branchId } };
+    return { token, user: { id: user.id, name: user.name, email: user.email, role: user.role, permissions: user.permissions, roleTemplate: user.roleTemplate, branchId: user.branchId } };
   }
 
   async changePassword(userId: string, dto: ChangePasswordDto) {

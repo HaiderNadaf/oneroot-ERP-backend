@@ -29,7 +29,7 @@ import {
 } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
 import { dateRange, docDate, nextDocNo, parseDay, num, paged, paging, paymentStatus, round2, round3, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { PaymentMode, PurchaseOrderStatus } from '../generated/prisma/enums.js';
@@ -301,7 +301,7 @@ export class PurchasesService {
 }
 
 @Controller('purchases')
-@Roles('MANAGER', 'ACCOUNTANT')
+@Can('purchases.view')
 export class PurchasesController {
   constructor(private readonly purchases: PurchasesService) {}
 
@@ -316,12 +316,13 @@ export class PurchasesController {
   }
 
   @Post()
+  @Can('purchases.manage')
   create(@Body() dto: CreatePurchaseDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.purchases.create(dto, user, needBranch(branchId));
   }
 
   @Delete(':id')
-  @Roles('MANAGER')
+  @Can('purchases.cancel')
   cancel(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.purchases.cancel(id, user);
   }

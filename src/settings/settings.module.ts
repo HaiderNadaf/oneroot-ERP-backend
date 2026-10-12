@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Injectable, Module, Put } from '@nestjs/common';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Roles, type AuthUser } from '../common/decorators.js';
+import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
 import { normalizeGstin, stateFromGstin } from '../common/gst.js';
 import { TtlCache } from '../common/cache.js';
 import type { StoreSettings } from '../generated/prisma/client.js';
@@ -75,7 +75,7 @@ export class SettingsController {
   }
 
   @Put()
-  @Roles('ADMIN')
+  @Can('admin.settings')
   async update(@Body() dto: UpdateSettingsDto, @CurrentUser() user: AuthUser) {
     const result = await this.settings.update(dto);
     await this.audit.log(user.id, 'UPDATE', 'StoreSettings', '1', { ...dto });

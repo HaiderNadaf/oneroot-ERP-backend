@@ -123,6 +123,9 @@ export class DashboardService implements OnApplicationBootstrap {
       cash,
       govtMismatches,
       approvalRequests,
+      byChannel,
+      byMode,
+      openVans,
     ] = await Promise.all([
       this.prisma.sale.aggregate({ where: curSale, _sum: { totalAmount: true }, _count: true }),
       this.prisma.sale.aggregate({ where: prevSale, _sum: { totalAmount: true } }),
@@ -270,6 +273,9 @@ export class DashboardService implements OnApplicationBootstrap {
       this.cash.reconciliation(branchId),
       this.govt.openMismatches(branchId),
       this.prisma.approvalRequest.count({ where: { status: 'PENDING', branchId: B } }),
+      this.prisma.sale.groupBy({ by: ['channel'], where: curSale, _sum: { totalAmount: true, paidAmount: true }, _count: true }),
+      this.prisma.payment.groupBy({ by: ['mode'], where: { direction: 'IN', branchId: B, paymentDate: { gte: r.from, lte: r.to } }, _sum: { amount: true } }),
+      this.prisma.vanTrip.count({ where: { status: 'OPEN', branchId: B } }),
     ]);
 
     // Side-by-side figures per branch, shown when looking at all branches
@@ -337,6 +343,13 @@ export class DashboardService implements OnApplicationBootstrap {
         cashGaps: cash.unexplained,
         openShifts: cash.openShifts,
         approvalRequests,
+        openVans,
+      },
+      // Where sales were made and how the money came in (credit = billed but not yet paid)
+      split: {
+        channels: byChannel.map((c) => ({ channel: c.channel, total: num(c._sum.totalAmount), bills: c._count })),
+        modes: byMode.map((m) => ({ mode: m.mode, amount: num(m._sum.amount) })).sort((a, b) => b.amount - a.amount),
+        credit: round2(byChannel.reduce((s, c) => s + num(c._sum.totalAmount) - num(c._sum.paidAmount), 0)),
       },
       cash,
       trend: monthly.map((m) => ({ month: m.month, sales: num(m.sales), purchases: num(m.purchases) })),

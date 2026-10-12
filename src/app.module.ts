@@ -24,6 +24,7 @@ import { PrismaModule } from './prisma/prisma.module.js';
 import { ImportModule } from './products/import.service.js';
 import { ProductsModule } from './products/products.module.js';
 import { SerialsModule } from './products/serials.module.js';
+import { VanModule } from './van/van.module.js';
 import { PurchasesModule } from './purchases/purchases.module.js';
 import { ReportsModule } from './reports/reports.module.js';
 import { SalesModule } from './sales/sales.module.js';
@@ -59,6 +60,7 @@ import { SmsModule } from './sms/sms.module.js';
     CategoriesModule,
     ProductsModule,
     SerialsModule,
+    VanModule,
     ImportModule,
     VendorsModule,
     CustomersModule,

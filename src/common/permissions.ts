@@ -10,6 +10,7 @@ export const PERMISSIONS = [
   { key: 'sales.bill', section: 'Sales & customers', label: 'Bill at the counter (POS), invoices, held bills and receipts', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
   { key: 'sales.returns', section: 'Sales & customers', label: 'Sales returns and credit notes', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
   { key: 'sales.cancel', section: 'Sales & customers', label: 'Cancel an invoice', roles: ['MANAGER'] },
+  { key: 'sales.van', section: 'Sales & customers', label: 'Run van sales trips: load stock, bill on the route, close the trip', roles: ['MANAGER', 'CASHIER'] },
   { key: 'customers.view', section: 'Sales & customers', label: 'Customers, ledgers and due reminders', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
   { key: 'customers.manage', section: 'Sales & customers', label: 'Add and edit customers, log follow-ups, send a reminder', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
   { key: 'customers.delete', section: 'Sales & customers', label: 'Delete customers', roles: ['MANAGER'] },

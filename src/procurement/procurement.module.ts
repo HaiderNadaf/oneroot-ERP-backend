@@ -278,6 +278,7 @@ export class ProcurementService {
     private readonly stock: StockService,
     private readonly payments: PaymentsService,
     private readonly audit: AuditService,
+    private readonly sms: SmsService,
     private readonly posting: PostingService,
     private readonly serials: SerialsService,
     private readonly sms: SmsService,

@@ -201,14 +201,28 @@ model User {
 }
 
 /// A custom role: a named set of permission ticks built on one of the built-in roles (which still supplies the authority limits)
-model RoleTemplate {
+/// A department groups the custom roles that belong to one function (Procurement, Sales, Warehouse...)
+model Department {
   id          String   @id @default(cuid())
   name        String   @unique
   description String?
-  baseRole    Role
-  permissions String[] @default([])
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  roles RoleTemplate[]
+}
+
+model RoleTemplate {
+  id           String      @id @default(cuid())
+  name         String      @unique
+  description  String?
+  /// Department this role belongs to (optional)
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id])
+  baseRole     Role
+  permissions  String[]    @default([])
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
 
   users User[]
 }

@@ -22,6 +22,8 @@ import { PrismaService } from '../prisma/prisma.service.js';
 class RoleTemplateDto {
   @IsString() @MinLength(2) name: string;
   @IsOptional() @IsString() description?: string;
+  /** Department this role belongs to; empty = no department */
+  @IsOptional() @IsString() departmentId?: string | null;
   /** Built-in role that supplies the authority limits (never ADMIN) */
   @IsEnum(Role) baseRole: Role;
   @IsArray() @IsString({ each: true }) permissions: string[];
@@ -29,11 +31,23 @@ class RoleTemplateDto {
   @IsOptional() @IsBoolean() applyToUsers?: boolean;
 }
 
+class DepartmentDto {
+  @IsString() @MinLength(2) name: string;
+  @IsOptional() @IsString() description?: string;
+}
+
 const BUILT_IN = new Set(['ADMIN', 'MANAGER', 'CASHIER', 'ACCOUNTANT', 'ADMINISTRATOR', 'OWNER']);
+
+/** Shape a role row for the API: flat department fields and the number of users holding it */
+function shapeRole<T extends { _count: { users: number }; department: { id: string; name: string } | null }>({ _count, ...t }: T) {
+  return { ...t, userCount: _count.users };
+}
+
+const ROLE_INCLUDE = { _count: { select: { users: true } }, department: { select: { id: true, name: true } } } as const;
 
 /**
  * Custom roles: a named set of ticks an administrator defines once and then gives to users.
- * The base role still decides discount / refund / adjustment ceilings (Roles & Limits).
+ * Roles sit inside a department. The base role still decides discount / refund / adjustment ceilings (Roles & Limits).
  */
 @Injectable()
 export class RolesService {
@@ -42,13 +56,9 @@ export class RolesService {
     private readonly audit: AuditService,
   ) {}
 
-  private shape<T extends { _count: { users: number } }>({ _count, ...t }: T) {
-    return { ...t, userCount: _count.users };
-  }
-
   async list() {
-    const rows = await this.prisma.roleTemplate.findMany({ orderBy: { name: 'asc' }, include: { _count: { select: { users: true } } } });
-    return rows.map((r) => this.shape(r));
+    const rows = await this.prisma.roleTemplate.findMany({ orderBy: [{ department: { name: 'asc' } }, { name: 'asc' }], include: ROLE_INCLUDE });
+    return rows.map((r) => shapeRole(r));
   }
 
   /** Ticks to store: unknown keys rejected; a delegated admin may only hand out what they hold */
@@ -66,18 +76,26 @@ export class RolesService {
     return perms;
   }
 
+  private async departmentOrNull(id: string | null | undefined) {
+    if (!id) return null;
+    const d = await this.prisma.department.findUnique({ where: { id } });
+    if (!d) throw new BadRequestException('That department no longer exists');
+    return d.id;
+  }
+
   async create(dto: RoleTemplateDto, by: AuthUser) {
     const permissions = this.check(dto, by);
     const name = dto.name.trim();
     if (await this.prisma.roleTemplate.findFirst({ where: { name: { equals: name, mode: 'insensitive' } } })) {
       throw new BadRequestException('A role with this name already exists');
     }
+    const departmentId = await this.departmentOrNull(dto.departmentId);
     const row = await this.prisma.roleTemplate.create({
-      data: { name, description: dto.description?.trim() || null, baseRole: dto.baseRole, permissions },
-      include: { _count: { select: { users: true } } },
+      data: { name, description: dto.description?.trim() || null, departmentId, baseRole: dto.baseRole, permissions },
+      include: ROLE_INCLUDE,
     });
-    await this.audit.log(by.id, 'CREATE', 'RoleTemplate', row.id, { name, baseRole: dto.baseRole, permissions });
-    return this.shape(row);
+    await this.audit.log(by.id, 'CREATE', 'RoleTemplate', row.id, { name, department: row.department?.name ?? null, baseRole: dto.baseRole, permissions });
+    return shapeRole(row);
   }
 
   async update(id: string, dto: RoleTemplateDto, by: AuthUser) {
@@ -85,11 +103,12 @@ export class RolesService {
     const name = dto.name.trim();
     const clash = await this.prisma.roleTemplate.findFirst({ where: { name: { equals: name, mode: 'insensitive' }, NOT: { id } } });
     if (clash) throw new BadRequestException('A role with this name already exists');
+    const departmentId = await this.departmentOrNull(dto.departmentId);
     const row = await this.prisma.$transaction(async (tx) => {
       const r = await tx.roleTemplate.update({
         where: { id },
-        data: { name, description: dto.description?.trim() || null, baseRole: dto.baseRole, permissions },
-        include: { _count: { select: { users: true } } },
+        data: { name, description: dto.description?.trim() || null, departmentId, baseRole: dto.baseRole, permissions },
+        include: ROLE_INCLUDE,
       });
       if (dto.applyToUsers) {
         await tx.user.updateMany({ where: { roleTemplateId: id }, data: { role: dto.baseRole, permissions } });
@@ -98,17 +117,55 @@ export class RolesService {
     });
     // Everyone holding the role may have new ticks: drop the cached sessions
     userCache.clear();
-    await this.audit.log(by.id, 'UPDATE', 'RoleTemplate', id, { name, baseRole: dto.baseRole, permissions, applyToUsers: !!dto.applyToUsers });
-    return this.shape(row);
+    await this.audit.log(by.id, 'UPDATE', 'RoleTemplate', id, { name, department: row.department?.name ?? null, baseRole: dto.baseRole, permissions, applyToUsers: !!dto.applyToUsers });
+    return shapeRole(row);
   }
 
   async remove(id: string, by: AuthUser) {
-    const row = await this.prisma.roleTemplate.findUniqueOrThrow({ where: { id }, include: { _count: { select: { users: true } } } });
+    const row = await this.prisma.roleTemplate.findUniqueOrThrow({ where: { id }, include: ROLE_INCLUDE });
     if (row._count.users) {
       throw new BadRequestException(`${row._count.users} user${row._count.users > 1 ? 's' : ''} still ${row._count.users > 1 ? 'have' : 'has'} this role — give them another role first`);
     }
     await this.prisma.roleTemplate.delete({ where: { id } });
     await this.audit.log(by.id, 'DELETE', 'RoleTemplate', id, { name: row.name });
+    return { ok: true };
+  }
+
+  // ───────────── Departments ─────────────
+
+  async listDepartments() {
+    const rows = await this.prisma.department.findMany({ orderBy: { name: 'asc' }, include: { _count: { select: { roles: true } } } });
+    return rows.map(({ _count, ...d }) => ({ ...d, roleCount: _count.roles }));
+  }
+
+  private async checkDepartmentName(name: string, exceptId?: string) {
+    const clash = await this.prisma.department.findFirst({ where: { name: { equals: name, mode: 'insensitive' }, ...(exceptId ? { NOT: { id: exceptId } } : {}) } });
+    if (clash) throw new BadRequestException('A department with this name already exists');
+  }
+
+  async createDepartment(dto: DepartmentDto, by: AuthUser) {
+    const name = dto.name.trim();
+    await this.checkDepartmentName(name);
+    const row = await this.prisma.department.create({ data: { name, description: dto.description?.trim() || null } });
+    await this.audit.log(by.id, 'CREATE', 'Department', row.id, { name });
+    return { ...row, roleCount: 0 };
+  }
+
+  async updateDepartment(id: string, dto: DepartmentDto, by: AuthUser) {
+    const name = dto.name.trim();
+    await this.checkDepartmentName(name, id);
+    const row = await this.prisma.department.update({ where: { id }, data: { name, description: dto.description?.trim() || null } });
+    await this.audit.log(by.id, 'UPDATE', 'Department', id, { name });
+    return row;
+  }
+
+  async removeDepartment(id: string, by: AuthUser) {
+    const row = await this.prisma.department.findUniqueOrThrow({ where: { id }, include: { _count: { select: { roles: true } } } });
+    if (row._count.roles) {
+      throw new BadRequestException(`This department still has ${row._count.roles} role${row._count.roles > 1 ? 's' : ''} — move or delete them first`);
+    }
+    await this.prisma.department.delete({ where: { id } });
+    await this.audit.log(by.id, 'DELETE', 'Department', id, { name: row.name });
     return { ok: true };
   }
 }
@@ -143,8 +200,37 @@ export class RoleTemplatesController {
   }
 }
 
+@Controller('departments')
+export class DepartmentsController {
+  constructor(private readonly roles: RolesService) {}
+
+  @Get()
+  @Can('admin.roles', 'admin.users')
+  list() {
+    return this.roles.listDepartments();
+  }
+
+  @Post()
+  @Can('admin.roles')
+  create(@Body() dto: DepartmentDto, @CurrentUser() user: AuthUser) {
+    return this.roles.createDepartment(dto, user);
+  }
+
+  @Put(':id')
+  @Can('admin.roles')
+  update(@Param('id') id: string, @Body() dto: DepartmentDto, @CurrentUser() user: AuthUser) {
+    return this.roles.updateDepartment(id, dto, user);
+  }
+
+  @Delete(':id')
+  @Can('admin.roles')
+  remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.roles.removeDepartment(id, user);
+  }
+}
+
 @Module({
-  controllers: [RoleTemplatesController],
+  controllers: [RoleTemplatesController, DepartmentsController],
   providers: [RolesService],
   exports: [RolesService],
 })

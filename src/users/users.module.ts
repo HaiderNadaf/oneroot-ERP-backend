@@ -53,7 +53,7 @@ const publicFields = {
   phone: true,
   role: true,
   roleTemplateId: true,
-  roleTemplate: { select: { id: true, name: true } },
+  roleTemplate: { select: { id: true, name: true, department: { select: { id: true, name: true } } } },
   permissions: true,
   branchId: true,
   branch: { select: { id: true, code: true, name: true } },

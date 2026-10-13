@@ -23,6 +23,7 @@ import { SalesModule } from './sales/sales.module.js';
 import { SettingsModule } from './settings/settings.module.js';
 import { UsersModule } from './users/users.module.js';
 import { VendorsModule } from './vendors/vendors.module.js';
+import { SmsModule } from './sms/sms.module.js';
 
 @Module({
   imports: [
@@ -51,6 +52,7 @@ import { VendorsModule } from './vendors/vendors.module.js';
     ExpensesModule,
     DashboardModule,
     ReportsModule,
+    SmsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: AuthGuard },

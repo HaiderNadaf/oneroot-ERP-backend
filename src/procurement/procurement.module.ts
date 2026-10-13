@@ -55,6 +55,7 @@ import { NotificationsService } from '../notifications/notifications.module.js';
 import { PaymentsService } from '../payments/payments.module.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 import { calcPurchaseItem } from '../purchases/purchases.module.js';
+import { SmsService } from '../sms/sms.service.js';
 import { ApprovalsService, type ChainStep } from './approvals.service.js';
 
 type Tx = Prisma.TransactionClient;
@@ -271,6 +272,7 @@ export class ProcurementService {
     private readonly stock: StockService,
     private readonly payments: PaymentsService,
     private readonly audit: AuditService,
+    private readonly sms: SmsService,
   ) {}
 
   private history(
@@ -905,10 +907,14 @@ export class ProcurementService {
   }
 
   async createGrn(poId: string, dto: CreateGrnDto, user: AuthUser, currentBranch: string | null = null) {
-    return this.prisma.$transaction(async (tx) => {
+    const { grn, sms } = await this.prisma.$transaction(async (tx) => {
       const po = await tx.purchaseOrder.findUniqueOrThrow({
         where: { id: poId },
-        include: { items: { include: { product: true } }, branch: true },
+        include: {
+          items: { include: { product: true } },
+          branch: true,
+          vendor: { select: { name: true, phone: true } },
+        },
       });
       if (!RECEIVABLE.includes(po.status))
         throw new BadRequestException('Only approved POs can receive goods');
@@ -946,6 +952,7 @@ export class ProcurementService {
         gstRate: number;
       }[] = [];
       const summary: string[] = [];
+      const qty = { passed: 0, rejected: 0, damaged: 0, expired: 0 };
       for (const r of rows) {
         const line = po.items.find((i) => i.id === r.poItemId);
         if (!line) throw new BadRequestException('Item is not on this PO');
@@ -1012,6 +1019,10 @@ export class ProcurementService {
             expiredQty: { increment: r.expiredQty },
           },
         });
+        qty.passed += r.passedQty;
+        qty.rejected += r.rejectedQty;
+        qty.damaged += r.damagedQty;
+        qty.expired += r.expiredQty;
         if (r.rejectedQty > 0)
           rejected.push({
             productId: p.id,
@@ -1041,6 +1052,7 @@ export class ProcurementService {
         summary.join('; '),
       );
 
+      let dnNo: string | null = null;
       if (rejected.length) {
         const lines = rejected.map((l) => {
           const subtotal = round2(l.quantity * l.rate);
@@ -1068,6 +1080,7 @@ export class ProcurementService {
             items: { create: lines.map(({ subtotal: _s, ...l }) => l) },
           },
         });
+        dnNo = dn.dnNo;
         await this.notifications.toRoles(
           ['MANAGER', 'ACCOUNTANT'],
           {
@@ -1099,8 +1112,28 @@ export class ProcurementService {
         { grnNo, poNo: po.poNo },
         tx,
       );
-      return grn;
+
+      // Custom GRN text, kept for when the Twilio account is upgraded (trial accounts reject custom bodies)
+      // const settings = await tx.storeSettings.findUnique({ where: { id: 1 }, select: { storeName: true } });
+      // const issues = [
+      //   qty.rejected && `${round3(qty.rejected)} rejected`,
+      //   qty.damaged && `${round3(qty.damaged)} damaged`,
+      //   qty.expired && `${round3(qty.expired)} expired`,
+      // ].filter(Boolean);
+      // const text =
+      //   `Dear ${po.vendor.name}, ${settings?.storeName ?? 'OneRoot'} has received goods against ${po.poNo} ` +
+      //   `(GRN ${grnNo}) on ${receivedAt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}. ` +
+      //   `Accepted qty: ${round3(qty.passed)}` +
+      //   (issues.length ? `; ${issues.join(', ')}` : '') +
+      //   (dnNo ? `. Debit note ${dnNo} raised for rejected goods` : '') +
+      //   '. Thank you.';
+      // Twilio trial accounts can only send predefined templates; the body is the template name
+      const text = 'sms_delivery_updates';
+      return { grn, sms: { phone: po.vendor.phone, text } };
     }, TX_OPTIONS);
+    // Sent after commit; never throws, so an SMS failure can't undo the GRN
+    this.sms.notify(sms.phone, sms.text, `GRN ${grn.grnNo} SMS`);
+    return grn;
   }
 
   /** Book the vendor's bill for what passed inspection; compares rates with the PO (three-way match) */

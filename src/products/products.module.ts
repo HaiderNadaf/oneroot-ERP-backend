@@ -30,7 +30,7 @@ import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { storeBarcode } from '../common/barcode.js';
 import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
-import { nextSku, peekSku, skuPrefix } from '../common/sku.js';
+import { nextSku, peekSku } from '../common/sku.js';
 import { paged, paging, startOfDay, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { ProductType } from '../generated/prisma/enums.js';
@@ -49,11 +49,15 @@ class OpeningStockDto {
 }
 
 class CreateProductDto {
+  /** Ignored: SKUs are generated from the sub-category and never edited */
   @IsOptional() @IsString() sku?: string;
   @IsOptional() @IsString() barcode?: string;
   @IsString() name: string;
   @IsOptional() @IsEnum(ProductType) type?: ProductType;
+  /** Category the product sits under; must be the sub-category's category */
   @IsOptional() @IsString() categoryId?: string;
+  /** Sub-category the product is filed under (required for a new product) */
+  @IsOptional() @IsString() subCategoryId?: string;
   @IsOptional() @IsString() brand?: string;
   @IsOptional() @IsString() manufacturer?: string;
   @IsOptional() @IsString() technicalName?: string;
@@ -96,6 +100,7 @@ export class ProductsService {
       search?: string;
       type?: string;
       categoryId?: string;
+      subCategoryId?: string;
       status?: string;
       stock?: string;
       sort?: string;
@@ -108,6 +113,7 @@ export class ProductsService {
     const where: Prisma.ProductWhereInput = {
       type: (q.type as ProductType) || undefined,
       categoryId: q.categoryId || undefined,
+      subCategoryId: q.subCategoryId || undefined,
       isActive: q.status === 'inactive' ? false : q.status === 'all' ? undefined : true,
     };
     // Stock filter: in stock / at or below reorder level / out of stock
@@ -151,7 +157,10 @@ export class ProductsService {
     const [items, total] = await Promise.all([
       this.prisma.product.findMany({
         where,
-        include: { category: { select: { id: true, name: true, fields: true } } },
+        include: {
+          category: { select: { id: true, name: true } },
+          subCategory: { select: { id: true, name: true, fields: true } },
+        },
         orderBy: [orderBy, { name: 'asc' }],
         skip: p.skip,
         take: p.take,
@@ -205,7 +214,8 @@ export class ProductsService {
       this.prisma.product.findUniqueOrThrow({
         where: { id },
         include: {
-          category: true,
+          category: { select: { id: true, name: true, code: true, type: true } },
+          subCategory: { select: { id: true, name: true, code: true, fields: true } },
           batches: {
             where: { quantity: { gt: 0 }, branchId: branchId ?? undefined },
             include: { branch: { select: { id: true, code: true, name: true } } },
@@ -227,23 +237,22 @@ export class ProductsService {
     };
   }
 
-  /** SKU the next product in this category (or type) would get — for the form preview */
-  async previewSku(categoryId: string | undefined, type: string | undefined) {
-    return this.prisma.$transaction(async (tx) => {
-      const prefix = await skuPrefix(tx, categoryId, (type as ProductType) || 'OTHER');
-      return { prefix, sku: await peekSku(tx, prefix) };
-    });
+  /** SKU the next product in this sub-category would get — for the form preview */
+  async previewSku(subCategoryId: string | undefined) {
+    if (!subCategoryId) return { sku: null };
+    return this.prisma.$transaction(async (tx) => ({ sku: await peekSku(tx, subCategoryId) }));
   }
 
 
   async create(dto: CreateProductDto, user: AuthUser, branchId: string | null = null) {
-    const { openingStock, ...data } = dto;
+    const { openingStock, sku: _typed, ...data } = dto;
     return this.prisma.$transaction(async (tx) => {
-      const sku =
-        data.sku?.trim().toUpperCase() || (await nextSku(tx, await skuPrefix(tx, data.categoryId, data.type ?? 'OTHER')));
-      if (await tx.product.findUnique({ where: { sku } })) throw new BadRequestException(`SKU ${sku} already exists`);
+      // ORI + category + sub-category codes + running number; the tax type comes from the category
+      const { sku, type, categoryId } = await nextSku(tx, data.subCategoryId);
+      if (data.categoryId && data.categoryId !== categoryId) throw new BadRequestException('That sub-category belongs to another category');
+      data.categoryId = categoryId;
       const product = await tx.product.create({
-        data: { ...data, sku, barcode: data.barcode || undefined, location: data.location?.trim() || undefined, attributes: data.attributes as Prisma.InputJsonValue | undefined },
+        data: { ...data, type: type ?? data.type ?? 'OTHER', sku, barcode: data.barcode || undefined, location: data.location?.trim() || undefined, attributes: data.attributes as Prisma.InputJsonValue | undefined },
       });
       if (openingStock?.quantity) {
         const unitCost = openingStock.unitCost ?? dto.purchasePrice ?? 0;
@@ -296,7 +305,19 @@ export class ProductsService {
   }
 
   async update(id: string, dto: UpdateProductDto, user: AuthUser) {
-    const { openingStock: _ignored, attributes, location, ...data } = dto;
+    // The SKU never changes once assigned, even if the product moves to another sub-category
+    const { openingStock: _ignored, sku: _sku, attributes, location, ...data } = dto;
+    if (data.subCategoryId) {
+      const sub = await this.prisma.subCategory.findUnique({ where: { id: data.subCategoryId }, include: { category: true } });
+      if (!sub) throw new BadRequestException('Sub-category not found');
+      if (data.categoryId && data.categoryId !== sub.categoryId) throw new BadRequestException('That sub-category belongs to another category');
+      data.categoryId = sub.categoryId;
+      if (sub.category.type) data.type = sub.category.type;
+    } else if (data.subCategoryId === '' || data.categoryId === '') {
+      throw new BadRequestException('A product must stay in a sub-category');
+    } else if (data.categoryId) {
+      throw new BadRequestException('Choose a sub-category of that category too');
+    }
     const product = await this.prisma.product.update({
       where: { id },
       data: {
@@ -342,8 +363,8 @@ export class ProductsController {
   }
 
   @Get('next-sku')
-  nextSku(@Query('categoryId') categoryId?: string, @Query('type') type?: string) {
-    return this.products.previewSku(categoryId || undefined, type);
+  nextSku(@Query('subCategoryId') subCategoryId?: string) {
+    return this.products.previewSku(subCategoryId || undefined);
   }
 
   @Get(':id')

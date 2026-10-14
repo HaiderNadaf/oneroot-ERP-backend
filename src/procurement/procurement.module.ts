@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsBoolean,
@@ -71,20 +72,35 @@ class PoItemDto {
   @Type(() => Number) @IsNumber() @IsPositive() rate: number;
 }
 
+/** Validity choices offered on the PO form */
+const PO_EXPIRY_DAYS = [7, 14];
+
 class SavePoDto {
   @IsString() vendorId: string;
   /** Branch the goods are delivered to; defaults to the branch selected in the top bar */
   @IsOptional() @IsString() branchId?: string;
   @IsOptional() @IsDateString() orderDate?: string;
   @IsOptional() @IsDateString() expectedDate?: string;
+  /** How many days the PO stays valid */
+  @Type(() => Number) @IsIn(PO_EXPIRY_DAYS, { message: `Expiry days must be ${PO_EXPIRY_DAYS.join(' or ')}` }) expiryDays: number;
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => PoItemDto)
   items: PoItemDto[];
   @IsOptional() @IsString() notes?: string;
+  /** Freight on this order, added to the PO total */
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) transportCharges?: number;
+  /** Other charges (loading, packing …), added to the PO total */
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) otherCharges?: number;
+  @IsOptional() @IsString() otherChargesNote?: string;
   /** true = submit for approval, false = save as draft */
   @IsBoolean() submit: boolean;
+}
+
+class BulkApproveDto {
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(200) @IsString({ each: true }) ids: string[];
+  @IsOptional() @IsString() note?: string;
 }
 
 class DecideDto {
@@ -478,14 +494,26 @@ export class ProcurementService {
       });
       const lines = poLines(dto.items, new Map(products.map((p) => [p.id, p])));
       const subtotal = round2(lines.reduce((s, l) => s + l.taxable, 0));
-      const totalAmount = round2(lines.reduce((s, l) => s + l.amount, 0));
-      const taxAmount = round2(totalAmount - subtotal);
+      const itemsTotal = round2(lines.reduce((s, l) => s + l.amount, 0));
+      const taxAmount = round2(itemsTotal - subtotal);
+      const transportCharges = round2(dto.transportCharges ?? 0);
+      const otherCharges = round2(dto.otherCharges ?? 0);
+      // Charges count towards the value that picks the approval band
+      const raw = round2(itemsTotal + transportCharges + otherCharges);
+      // Whole rupees: up to .49 goes down, .50 and above goes up
+      const totalAmount = Math.round(raw);
+      const roundOff = round2(totalAmount - raw);
       const chain = await this.approvals.chainFor(totalAmount, tx);
       const header = {
         vendorId: dto.vendorId,
         ...(dto.branchId ? { branchId: dto.branchId } : {}),
         orderDate: docDate(dto.orderDate),
         expectedDate: dto.expectedDate ? parseDay(dto.expectedDate) : null,
+        expiryDays: dto.expiryDays,
+        transportCharges,
+        otherCharges,
+        otherChargesNote: otherCharges ? dto.otherChargesNote?.trim() || null : null,
+        roundOff,
         notes: dto.notes || null,
         subtotal,
         taxAmount,
@@ -760,6 +788,28 @@ export class ProcurementService {
   }
 
   /** POs waiting for a decision, grouped by step, plus recent decisions */
+  /**
+   * Approve several POs at the current user's step. Each PO goes through decide() in its own
+   * transaction, so one that can't be approved (already moved on, wrong approver) doesn't block the rest.
+   */
+  async bulkApprove(dto: BulkApproveDto, user: AuthUser) {
+    const ids = [...new Set(dto.ids)];
+    const pos = await this.prisma.purchaseOrder.findMany({ where: { id: { in: ids } }, select: { id: true, poNo: true } });
+    const poNo = new Map(pos.map((p) => [p.id, p.poNo]));
+    const results: { id: string; poNo: string | null; ok: boolean; error?: string }[] = [];
+    for (const id of ids) {
+      try {
+        if (!poNo.has(id)) throw new BadRequestException('Purchase order not found');
+        await this.decide(id, { action: 'approve', note: dto.note }, user);
+        results.push({ id, poNo: poNo.get(id) ?? null, ok: true });
+      } catch (e) {
+        results.push({ id, poNo: poNo.get(id) ?? null, ok: false, error: e instanceof Error ? e.message : 'Could not approve' });
+      }
+    }
+    const approved = results.filter((r) => r.ok).length;
+    return { approved, failed: results.length - approved, results };
+  }
+
   async approvalQueue(user: AuthUser) {
     const [pending, decisions, config] = await Promise.all([
       this.prisma.purchaseOrder.findMany({
@@ -1636,6 +1686,11 @@ export class PurchaseOrdersController {
     @BranchId() branchId: string | null,
   ) {
     return this.svc.savePo(id, dto, user, branchId);
+  }
+
+  @Post('approvals/bulk-approve')
+  bulkApprove(@Body() dto: BulkApproveDto, @CurrentUser() user: AuthUser) {
+    return this.svc.bulkApprove(dto, user);
   }
 
   @Post(':id/decision')

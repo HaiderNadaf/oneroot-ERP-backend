@@ -28,7 +28,6 @@ class ChangePasswordDto {
 }
 
 const DEFAULT_EXPENSE_CATEGORIES = ['Rent', 'Salary', 'Electricity', 'Transport', 'Loading/Unloading', 'Maintenance', 'Miscellaneous'];
-const DEFAULT_PRODUCT_CATEGORIES = ['Seeds', 'Fertilizers', 'Pesticides', 'Fungicides', 'Herbicides', 'Bio Products', 'Equipment & Tools', 'Irrigation'];
 
 @Injectable()
 export class AuthService implements OnApplicationBootstrap {
@@ -40,7 +39,7 @@ export class AuthService implements OnApplicationBootstrap {
     private readonly audit: AuditService,
   ) {}
 
-  /** First run: create the admin account, store profile and default categories */
+  /** First run: create the admin account, store profile and default expense categories (product categories: CategoriesModule) */
   async onApplicationBootstrap() {
     if ((await this.prisma.user.count()) > 0) return;
     const email = process.env.ADMIN_EMAIL ?? 'admin@oneroot.farm';
@@ -51,10 +50,6 @@ export class AuthService implements OnApplicationBootstrap {
     await this.prisma.storeSettings.upsert({ where: { id: 1 }, create: {}, update: {} });
     await this.prisma.expenseCategory.createMany({
       data: DEFAULT_EXPENSE_CATEGORIES.map((name) => ({ name })),
-      skipDuplicates: true,
-    });
-    await this.prisma.category.createMany({
-      data: DEFAULT_PRODUCT_CATEGORIES.map((name) => ({ name })),
       skipDuplicates: true,
     });
     this.logger.warn(`Created default admin ${email} / ${password} — change this password after first login.`);

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -14,7 +15,7 @@ import {
 } from '@nestjs/common';
 import { PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsEmail, IsInt, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { IsBoolean, IsEmail, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 import { ValidateIf } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
@@ -30,7 +31,7 @@ class CreateVendorDto {
   @IsOptional() @IsString() contactPerson?: string;
   @IsOptional() @IsString() phone?: string;
   @IsOptional() @ValidateIf((o) => !!o.email) @IsEmail() email?: string;
-  @IsOptional() @IsString() gstin?: string;
+  @IsString() @IsNotEmpty({ message: 'GSTIN is required' }) gstin: string;
   @IsOptional() @IsString() address?: string;
   @IsOptional() @IsString() city?: string;
   @IsOptional() @IsString() state?: string;
@@ -121,6 +122,7 @@ export class VendorsService {
   async update(id: string, dto: UpdateVendorDto, user: AuthUser) {
     // Normalise the GSTIN and take the state from its first two digits when none was chosen
     const gstin = normalizeGstin(dto.gstin);
+    if (gstin === '') throw new BadRequestException('GSTIN is required');
     dto = { ...dto, gstin: gstin as string, state: dto.state || stateFromGstin(gstin) || dto.state };
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.vendor.findUniqueOrThrow({ where: { id } });

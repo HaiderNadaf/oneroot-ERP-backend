@@ -1,92 +1,61 @@
+import { BadRequestException } from '@nestjs/common';
 import type { Prisma } from '../generated/prisma/client.js';
 import type { ProductType } from '../generated/prisma/enums.js';
 
-type Db = Prisma.TransactionClient | { category: Prisma.TransactionClient['category'] };
+/** Every product SKU starts with this */
+export const SKU_PREFIX = 'ORI';
 
-/** Familiar codes for the default agri categories */
-const KNOWN: Record<string, string> = {
-  seeds: 'SED',
-  fertilizers: 'FRT',
-  fertiliser: 'FRT',
-  fertilizer: 'FRT',
-  pesticides: 'PST',
-  insecticides: 'INS',
-  fungicides: 'FNG',
-  herbicides: 'HRB',
-  'bio products': 'BIO',
-  'equipment & tools': 'EQP',
-  equipment: 'EQP',
-  irrigation: 'IRG',
-  'micro nutrients': 'MCN',
-  micronutrients: 'MCN',
-  'plant growth regulators': 'PGR',
-};
+/** Digits after ORI: category code + sub-category code + running number */
+const SKU_DIGITS = 11;
 
-/** Fallback prefix when a product has no category */
-export const TYPE_PREFIX: Record<ProductType, string> = {
-  SEED: 'SED',
-  FERTILIZER: 'FRT',
-  PESTICIDE: 'PST',
-  EQUIPMENT: 'EQP',
-  OTHER: 'GEN',
-};
+/** Category / sub-category SKU code: 1 to 999, no leading zero */
+export const CODE_PATTERN = /^[1-9]\d{0,2}$/;
 
-export const CODE_PATTERN = /^[A-Z0-9]{2,6}$/;
-
-/** "Fertilizers" -> FRT: first letter + following consonants, or the known code */
-export function baseCode(name: string) {
-  const known = KNOWN[name.trim().toLowerCase()];
-  if (known) return known;
-  const letters = name.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  if (!letters) return 'CAT';
-  const consonants = letters.slice(1).replace(/[AEIOU]/g, '');
-  return (letters[0] + consonants + letters.slice(1)).slice(0, 3).padEnd(3, 'X');
+/** ORI + category code + sub-category code + running number, e.g. category 1, sub 3, #1 → ORI13000000001 */
+export function formatSku(codes: { category: string; sub: string }, n: number) {
+  const width = SKU_DIGITS - codes.category.length - codes.sub.length;
+  const run = String(n);
+  if (run.length > width) throw new BadRequestException(`SKU numbers for this sub-category are used up (${run})`);
+  return `${SKU_PREFIX}${codes.category}${codes.sub}${run.padStart(width, '0')}`;
 }
 
-/** A code not used by any other category (FRT, FRT2, FRT3 …) */
-export async function uniqueCode(db: Db, name: string, exceptId?: string) {
-  const base = baseCode(name);
-  for (let i = 1; ; i++) {
-    const code = i === 1 ? base : `${base}${i}`;
-    const clash = await db.category.findFirst({ where: { code, id: exceptId ? { not: exceptId } : undefined } });
-    if (!clash) return code;
-  }
+const seqKey = (codes: { category: string; sub: string }) => `SKU-${SKU_PREFIX}-${codes.category}-${codes.sub}`;
+
+/** Next free numeric code among existing ones (1, 2 … skipping any taken) */
+export function nextFreeCode(taken: (string | null)[]) {
+  const used = new Set(taken.filter(Boolean));
+  for (let n = 1; ; n++) if (!used.has(String(n))) return String(n);
 }
 
-/** Prefix for a new product: its category's code, else its type */
-export async function skuPrefix(db: Prisma.TransactionClient, categoryId: string | null | undefined, type: ProductType) {
-  if (categoryId) {
-    const cat = await db.category.findUnique({ where: { id: categoryId } });
-    if (cat?.code) return cat.code;
-    if (cat) {
-      // Category created before codes existed: give it one now
-      const code = await uniqueCode(db, cat.name, cat.id);
-      await db.category.update({ where: { id: cat.id }, data: { code } });
-      return code;
-    }
-  }
-  return TYPE_PREFIX[type];
+/** Codes behind a sub-category's SKUs, plus the tax type and category it files the product under */
+async function codesOf(db: Prisma.TransactionClient, subCategoryId: string | undefined) {
+  if (!subCategoryId) throw new BadRequestException('Choose a sub-category');
+  const sub = await db.subCategory.findUnique({ where: { id: subCategoryId }, include: { category: true } });
+  if (!sub) throw new BadRequestException('Sub-category not found');
+  if (!sub.code || !sub.category.code) throw new BadRequestException(`Give ${sub.category.name} › ${sub.name} a SKU code under Categories first`);
+  return { codes: { category: sub.category.code, sub: sub.code }, type: sub.category.type as ProductType | null, categoryId: sub.categoryId };
 }
 
-const format = (prefix: string, n: number) => `${prefix}-${String(n).padStart(4, '0')}`;
-
-/** Next free SKU for a prefix without using it up (for the form preview) */
-export async function peekSku(db: Prisma.TransactionClient, prefix: string) {
-  const seq = await db.sequence.findUnique({ where: { key: `SKU-${prefix}` } });
+/** SKU the next product in this sub-category would get, without using it up (form preview) */
+export async function peekSku(db: Prisma.TransactionClient, subCategoryId: string) {
+  const { codes } = await codesOf(db, subCategoryId);
+  const seq = await db.sequence.findUnique({ where: { key: seqKey(codes) } });
   for (let n = (seq?.value ?? 0) + 1; ; n++) {
-    if (!(await db.product.findUnique({ where: { sku: format(prefix, n) } }))) return format(prefix, n);
+    const sku = formatSku(codes, n);
+    if (!(await db.product.findUnique({ where: { sku } }))) return sku;
   }
 }
 
-/** Allocates the next SKU for a prefix, skipping any number already taken by a hand-typed SKU */
-export async function nextSku(db: Prisma.TransactionClient, prefix: string) {
+/** Allocates the next SKU in a sub-category; also returns the category's tax type and id */
+export async function nextSku(db: Prisma.TransactionClient, subCategoryId: string | undefined) {
+  const { codes, type, categoryId } = await codesOf(db, subCategoryId);
   for (;;) {
     const seq = await db.sequence.upsert({
-      where: { key: `SKU-${prefix}` },
-      create: { key: `SKU-${prefix}`, value: 1 },
+      where: { key: seqKey(codes) },
+      create: { key: seqKey(codes), value: 1 },
       update: { value: { increment: 1 } },
     });
-    const sku = format(prefix, seq.value);
-    if (!(await db.product.findUnique({ where: { sku } }))) return sku;
+    const sku = formatSku(codes, seq.value);
+    if (!(await db.product.findUnique({ where: { sku } }))) return { sku, type, categoryId };
   }
 }

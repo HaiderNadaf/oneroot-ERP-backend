@@ -343,16 +343,37 @@ model AuditLog {
 
 // ───────────────────────── Catalogue ─────────────────────────
 
+/// Product category (top level), e.g. Farm Machinery, Seeds. Its sub-categories live in SubCategory.
 model Category {
+  id            String        @id @default(cuid())
+  name          String        @unique
+  /// Numeric SKU code: 1, 2 … (locked once products use it)
+  code          String?       @unique
+  description   String?
+  /// Tax type (GST / HSN defaults, govt fertiliser rules) for every product under this category
+  type          ProductType?
+  subCategories SubCategory[]
+  products      Product[]
+  createdAt     DateTime      @default(now())
+}
+
+/// Sub-category of one Category, e.g. Farm Machinery → Tractors. Products are filed under a sub-category.
+model SubCategory {
   id          String    @id @default(cuid())
-  name        String    @unique
-  /// Short code used as the SKU prefix for products in this category, e.g. FRT -> FRT-0001
-  code        String?   @unique
+  categoryId  String
+  category    Category  @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  name        String
+  /// Numeric SKU code, unique within its category (locked once products use it)
+  code        String?
   description String?
-  /// Extra fields every product in this category carries: [{ key, label, type, options?, required?, showOnBill? }]
+  /// Extra fields every product in this sub-category carries: [{ key, label, type, options?, required?, showOnBill? }]
   fields      Json?
   products    Product[]
   createdAt   DateTime  @default(now())
+
+  @@unique([categoryId, name])
+  @@unique([categoryId, code])
+  @@index([categoryId])
 }
 
 model Product {
@@ -363,6 +384,8 @@ model Product {
   type          ProductType @default(OTHER)
   categoryId    String?
   category      Category?   @relation(fields: [categoryId], references: [id])
+  subCategoryId String?
+  subCategory   SubCategory? @relation(fields: [subCategoryId], references: [id])
   brand         String?
   manufacturer  String?
   technicalName String? // active ingredient / composition, e.g. "Imidacloprid 17.8% SL"
@@ -409,6 +432,7 @@ model Product {
   @@index([type])
   @@index([isActive, name])
   @@index([categoryId])
+  @@index([subCategoryId])
 }
 
 /// A lot of stock with its own batch number, expiry and cost.
@@ -565,10 +589,19 @@ model PurchaseOrder {
   vendor        Vendor              @relation(fields: [vendorId], references: [id])
   orderDate     DateTime            @default(now())
   expectedDate  DateTime?
+  /// How many days the PO stays valid: 7 or 14 (null on POs created before this was added)
+  expiryDays    Int?
   status        PurchaseOrderStatus @default(DRAFT)
   subtotal      Decimal             @default(0) @db.Decimal(14, 2)
   taxAmount     Decimal             @default(0) @db.Decimal(14, 2)
-  /// Incl. GST - decides the approval band
+  /// Freight / transportation charged on this order (no GST)
+  transportCharges Decimal          @default(0) @db.Decimal(14, 2)
+  /// Any other charges (loading, packing …); otherChargesNote says what they are
+  otherCharges  Decimal             @default(0) @db.Decimal(14, 2)
+  otherChargesNote String?
+  /// Added to reach a whole-rupee total: .01–.49 rounds down, .50–.99 rounds up
+  roundOff      Decimal             @default(0) @db.Decimal(6, 2)
+  /// Items incl. GST plus the charges above, rounded to the rupee - decides the approval band
   totalAmount   Decimal             @default(0) @db.Decimal(14, 2)
   /// Approval round: goes up when a sent-back or approved PO is edited and resubmitted
   round         Int                 @default(1)

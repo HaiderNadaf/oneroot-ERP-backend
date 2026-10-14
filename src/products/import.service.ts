@@ -1,7 +1,7 @@
 import { BadRequestException, Body, Controller, Injectable, Module, Post } from '@nestjs/common';
 import { IsArray, IsBoolean, IsOptional } from 'class-validator';
 import { BranchId, Can, CurrentUser, type AuthUser } from '../common/decorators.js';
-import { ProductType } from '../generated/prisma/enums.js';
+import { SKU_PREFIX, formatSku } from '../common/sku.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ProductsModule, ProductsService } from './products.module.js';
 
@@ -30,13 +30,6 @@ interface FieldDef {
   required?: boolean;
 }
 
-const TYPE_ALIASES: Record<string, ProductType> = {
-  SEED: 'SEED', SEEDS: 'SEED',
-  FERTILIZER: 'FERTILIZER', FERTILISER: 'FERTILIZER', FERTILIZERS: 'FERTILIZER', FERTILISERS: 'FERTILIZER',
-  PESTICIDE: 'PESTICIDE', PESTICIDES: 'PESTICIDE', INSECTICIDE: 'PESTICIDE', FUNGICIDE: 'PESTICIDE', HERBICIDE: 'PESTICIDE', WEEDICIDE: 'PESTICIDE',
-  EQUIPMENT: 'EQUIPMENT', TOOLS: 'EQUIPMENT', TOOL: 'EQUIPMENT', MACHINERY: 'EQUIPMENT',
-  OTHER: 'OTHER', OTHERS: 'OTHER',
-};
 const GST_RATES = [0, 5, 12, 18, 28];
 
 const str = (v: unknown) => (v === null || v === undefined ? '' : String(v).trim());
@@ -54,7 +47,7 @@ const numOf = (v: unknown): number | undefined => {
   return Number.isFinite(x) ? x : NaN;
 };
 
-/** CSV bulk import: every row is checked first; on commit each row is its own transaction so one bad row doesn't block the rest */
+/** Bulk import (Excel or CSV rows): every row is checked first; on commit each row is its own transaction so one bad row doesn't block the rest */
 @Injectable()
 export class ImportService {
   constructor(
@@ -65,9 +58,30 @@ export class ImportService {
   async run(dto: ImportDto, user: AuthUser, branchId: string | null) {
     if (!Array.isArray(dto.rows) || !dto.rows.length) throw new BadRequestException('No rows to import');
     if (dto.rows.length > 2000) throw new BadRequestException('Import at most 2000 rows at a time');
-    const categories = await this.prisma.category.findMany();
-    const catByName = new Map(categories.map((c) => [c.name.trim().toLowerCase(), c]));
-    const catByCode = new Map(categories.filter((c) => c.code).map((c) => [c.code!.toUpperCase(), c]));
+    const tops = await this.prisma.category.findMany({ include: { subCategories: true } });
+    type Top = (typeof tops)[number];
+    type Sub = Top['subCategories'][number];
+    const subsOf = (categoryId: string) => tops.find((t) => t.id === categoryId)?.subCategories ?? [];
+    // A category / sub-category cell may hold its name or its SKU code
+    const findIn = <T extends { name: string; code: string | null }>(list: T[], raw: string) =>
+      list.find((c) => c.name.trim().toLowerCase() === raw.toLowerCase()) ?? list.find((c) => c.code === raw) ?? null;
+    // Next running number per sub-category, so the check step can show the SKU each new row will get
+    const nextRun = new Map<string, number>();
+    const predictSku = async (sub: Sub, parent: Top) => {
+      if (!sub.code || !parent.code) return undefined;
+      const codes = { category: parent.code, sub: sub.code };
+      let n = nextRun.get(sub.id);
+      if (n === undefined) {
+        const seq = await this.prisma.sequence.findUnique({ where: { key: `SKU-${SKU_PREFIX}-${codes.category}-${codes.sub}` } });
+        n = (seq?.value ?? 0) + 1;
+      }
+      nextRun.set(sub.id, n + 1);
+      try {
+        return formatSku(codes, n);
+      } catch {
+        return undefined;
+      }
+    };
     const results: RowResult[] = [];
     const seenSkus = new Set<string>();
     const seenBarcodes = new Set<string>();
@@ -84,16 +98,20 @@ export class ImportService {
       res.name = name;
       if (!name) res.errors.push('Name is required');
 
-      const typeRaw = str(r.type).toUpperCase().replace(/[^A-Z]/g, '');
-      const type: ProductType | undefined = typeRaw ? TYPE_ALIASES[typeRaw] : undefined;
-      if (typeRaw && !type) res.errors.push(`Unknown type "${str(r.type)}" — use SEED, FERTILIZER, PESTICIDE, EQUIPMENT or OTHER`);
-
-      let category = null as (typeof categories)[number] | null;
+      // Category → sub-category; the product is filed under the sub-category and its SKU is built from both codes
+      let parent = null as Top | null;
+      let category = null as Sub | null;
       const catRaw = str(r.category);
+      const subRaw = str(r.subCategory);
       if (catRaw) {
-        category = catByName.get(catRaw.toLowerCase()) ?? catByCode.get(catRaw.toUpperCase()) ?? null;
-        if (!category) res.errors.push(`Unknown category "${catRaw}" — add it under Products → Categories first`);
+        parent = findIn(tops, catRaw);
+        if (!parent) res.errors.push(`Unknown category "${catRaw}" — add it under Products → Categories first`);
       }
+      if (subRaw && !catRaw) res.errors.push('Fill the Category column too');
+      if (parent && subRaw) {
+        category = findIn(subsOf(parent.id), subRaw);
+        if (!category) res.errors.push(`"${subRaw}" is not a sub-category of ${parent.name}`);
+      } else if (parent && !subRaw) res.errors.push(`Fill the Sub-Category column with a sub-category of ${parent.name}`);
 
       const gstRate = numOf(r.gstRate);
       if (gstRate !== undefined && (Number.isNaN(gstRate) || !GST_RATES.includes(gstRate))) res.errors.push(`GST must be one of ${GST_RATES.join(', ')}`);
@@ -162,8 +180,12 @@ export class ImportService {
         res.sku = existing.sku;
         res.action = dto.updateExisting === false ? 'skip' : 'update';
       } else {
-        res.sku = sku || undefined;
-        if (nums.salePrice === undefined) res.errors.push('Sale price is required for a new product');
+        // New products always get a generated SKU; a typed one would bypass the ORI numbering
+        if (sku) res.errors.push(`SKU ${sku} doesn't exist — leave SKU blank for new products, it is generated automatically`);
+        if (!category) {
+          if (!catRaw) res.errors.push('Category and Sub-Category are required for a new product');
+        }
+        if (nums.salePrice === undefined) res.errors.push('Selling price is required for a new product');
       }
 
       if (res.errors.length) {
@@ -180,10 +202,8 @@ export class ImportService {
 
       const data = {
         name,
-        ...(sku ? { sku } : {}),
         ...(barcode ? { barcode } : {}),
-        ...(type ? { type } : {}),
-        ...(category ? { categoryId: category.id } : {}),
+        ...(category && parent ? { categoryId: parent.id, subCategoryId: category.id } : {}),
         brand: str(r.brand) || undefined,
         manufacturer: str(r.manufacturer) || undefined,
         technicalName: str(r.technicalName) || undefined,
@@ -199,12 +219,14 @@ export class ImportService {
         isSubsidised: bools.isSubsidised,
         trackSerial: bools.trackSerial,
         location: str(r.location) || undefined,
+        description: str(r.description) || undefined,
         ...(Object.keys(attributes).length ? { attributes } : {}),
       };
       // Drop undefined keys so an update leaves untouched fields alone
       const clean = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
 
       if (!dto.commit) {
+        if (res.action === 'create' && category && parent) res.sku = await predictSku(category, parent);
         if (res.action === 'create') created++;
         else updated++;
         results.push(res);

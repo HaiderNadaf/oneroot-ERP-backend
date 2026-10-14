@@ -30,7 +30,7 @@ import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { storeBarcode } from '../common/barcode.js';
 import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
-import { nextSku, peekSku } from '../common/sku.js';
+import { nextSku, peekSku, withUniqueSku } from '../common/sku.js';
 import { paged, paging, startOfDay, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { ProductType } from '../generated/prisma/enums.js';
@@ -240,14 +240,15 @@ export class ProductsService {
   /** SKU the next product in this sub-category would get — for the form preview */
   async previewSku(subCategoryId: string | undefined) {
     if (!subCategoryId) return { sku: null };
-    return this.prisma.$transaction(async (tx) => ({ sku: await peekSku(tx, subCategoryId) }));
+    return this.prisma.$transaction(async (tx) => ({ sku: await peekSku(tx) }));
   }
 
 
   async create(dto: CreateProductDto, user: AuthUser, branchId: string | null = null) {
     const { openingStock, sku: _typed, ...data } = dto;
-    return this.prisma.$transaction(async (tx) => {
-      // ORI + category + sub-category codes + running number; the tax type comes from the category
+    // The whole save is retried with the next number if a product saved at the same moment took this SKU
+    return withUniqueSku(() => this.prisma.$transaction(async (tx) => {
+      // ORI + one running number for all products; the tax type comes from the category
       const { sku, type, categoryId } = await nextSku(tx, data.subCategoryId);
       if (data.categoryId && data.categoryId !== categoryId) throw new BadRequestException('That sub-category belongs to another category');
       data.categoryId = categoryId;
@@ -278,7 +279,7 @@ export class ProductsService {
       }
       await this.audit.log(user.id, 'CREATE', 'Product', product.id, { name: product.name, sku }, tx);
       return tx.product.findUniqueOrThrow({ where: { id: product.id } });
-    }, TX_OPTIONS);
+    }, TX_OPTIONS));
   }
 
   /** Gives a product an in-store EAN-13 barcode (kept if it already has one) */

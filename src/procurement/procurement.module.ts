@@ -971,7 +971,11 @@ export class ProcurementService {
     const { grn, sms } = await this.prisma.$transaction(async (tx) => {
       const po = await tx.purchaseOrder.findUniqueOrThrow({
         where: { id: poId },
-        include: { items: { include: { product: true } }, branch: true, vendor: { select: { name: true, phone: true } } },
+        include: {
+          items: { include: { product: true } },
+          branch: true,
+          vendor: { select: { name: true, phone: true } },
+        },
       });
       if (!RECEIVABLE.includes(po.status))
         throw new BadRequestException('Only approved POs can receive goods');

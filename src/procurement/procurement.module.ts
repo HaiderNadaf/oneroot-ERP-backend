@@ -297,7 +297,6 @@ export class ProcurementService {
     private readonly sms: SmsService,
     private readonly posting: PostingService,
     private readonly serials: SerialsService,
-    private readonly sms: SmsService,
   ) {}
 
   private history(

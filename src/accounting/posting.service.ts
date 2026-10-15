@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { runAtStartup } from '../common/db-errors.js';
 import { TtlCache } from '../common/cache.js';
 import { isInterState } from '../common/gst.js';
 import { nextDocNo, num, round2 } from '../common/utils.js';
@@ -80,19 +81,18 @@ export class PostingService implements OnApplicationBootstrap {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async onApplicationBootstrap() {
-    try {
-      await this.ensureChart();
-    } catch (e) {
-      this.logger.error(`Chart of accounts setup failed: ${e instanceof Error ? e.message : e}`);
-    }
+  onApplicationBootstrap() {
+    runAtStartup(this.logger, 'Chart of accounts setup', () => this.ensureChart());
   }
 
-  /** Creates any missing system accounts (safe to run every start-up) */
+  /**
+   * Creates any missing system accounts (safe to run every start-up). Two queries in all: one upsert per account
+   * took ~24 round trips to the remote database on every start.
+   */
   async ensureChart(db: Db = this.prisma) {
-    for (const a of SYSTEM_ACCOUNTS) {
-      await db.account.upsert({ where: { key: a.key }, create: { ...a }, update: {} });
-    }
+    const have = new Set((await db.account.findMany({ where: { key: { in: SYSTEM_ACCOUNTS.map((a) => a.key) } }, select: { key: true } })).map((a) => a.key));
+    const missing = SYSTEM_ACCOUNTS.filter((a) => !have.has(a.key));
+    if (missing.length) await db.account.createMany({ data: missing.map((a) => ({ ...a })) });
     this.idCache.clear();
   }
 

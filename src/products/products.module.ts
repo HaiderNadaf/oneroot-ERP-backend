@@ -88,31 +88,46 @@ class CreateProductDto {
 
 class UpdateProductDto extends PartialType(CreateProductDto) {}
 
+/** Name / pack size compared ignoring case and spacing ("10 kg" = "10KG") */
+const normName = (v?: string | null) => (v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+const normSize = (v?: string | null) => (v ?? '').replace(/\s+/g, '').toLowerCase();
+
+/** Same product name + pack size, whatever the unit: two products may not share both */
+export const sameProduct = (a: { name?: string | null; packSize?: string | null }, b: { name?: string | null; packSize?: string | null }) =>
+  normName(a.name) === normName(b.name) && normSize(a.packSize) === normSize(b.packSize);
+
 /**
- * A product is its name + pack size + unit: the same name may come in other pack sizes or units, but not twice in the
- * same one. Compared ignoring case and extra spaces; `exceptId` skips the product being edited.
+ * A product is its name + pack size: the same name may come in other pack sizes, but not twice in the same one —
+ * not even with another unit ("Chinamon Seed 10 KG" and "Chinamon Seed 10 PKT" are refused). `exceptId` skips the
+ * product being edited.
  */
-async function assertNotDuplicate(
+export async function assertNotDuplicate(
   db: Pick<Prisma.TransactionClient, 'product'>,
-  p: { name?: string | null; packSize?: string | null; unit?: string | null },
+  p: { name?: string | null; packSize?: string | null },
   exceptId?: string,
 ) {
-  const norm = (v?: string | null) => (v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
-  const name = norm(p.name);
+  const name = normName(p.name);
   if (!name) return;
   const candidates = await db.product.findMany({
     where: { name: { contains: name.split(' ')[0], mode: 'insensitive' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
     select: { name: true, packSize: true, unit: true, sku: true, isActive: true },
   });
-  const clash = candidates.find(
-    (c) => norm(c.name) === name && norm(c.packSize) === norm(p.packSize) && norm(c.unit) === norm(p.unit ?? 'NOS'),
-  );
+  const clash = candidates.find((c) => sameProduct(c, p));
   if (clash) {
     const size = [clash.packSize?.trim(), clash.unit].filter(Boolean).join(' ');
     throw new ConflictException(
-      `${clash.name} (${size}) already exists as ${clash.sku}${clash.isActive ? '' : ' (inactive)'} — change the pack size or unit, or edit that product`,
+      `${clash.name} (${size}) already exists as ${clash.sku}${clash.isActive ? '' : ' (inactive)'} — change the pack size, or edit that product`,
     );
   }
+}
+
+/**
+ * Holds a lock on this product name until the transaction ends, so two saves of the same name at the same moment
+ * (a double-clicked Save) run their duplicate check one after the other instead of both passing it.
+ */
+async function lockProductName(tx: Prisma.TransactionClient, name?: string | null) {
+  const key = normName(name);
+  if (key) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'product:' + key}))`;
 }
 
 /** Next unused in-store EAN-13 barcode */
@@ -310,7 +325,8 @@ export class ProductsService {
     const { openingStock, sku: _typed, ...data } = dto;
     // The whole save is retried with the next number if a product saved at the same moment took this SKU
     const saved = await withUniqueSku(() => this.prisma.$transaction(async (tx) => {
-      // Same name + pack size + unit is the same product: refuse it
+      // Same name + pack size is the same product, whatever the unit: refuse it
+      await lockProductName(tx, data.name);
       await assertNotDuplicate(tx, data);
       // ORI + category code + sub-category code + running number; the tax type comes from the category
       const { sku, type, categoryId } = await nextSku(tx, data.subCategoryId);
@@ -387,8 +403,8 @@ export class ProductsService {
     } else if (data.categoryId) {
       throw new BadRequestException('Choose a sub-category of that category too');
     }
-    if (data.name !== undefined || data.packSize !== undefined || data.unit !== undefined) {
-      const current = await this.prisma.product.findUniqueOrThrow({ where: { id }, select: { name: true, packSize: true, unit: true } });
+    if (data.name !== undefined || data.packSize !== undefined) {
+      const current = await this.prisma.product.findUniqueOrThrow({ where: { id }, select: { name: true, packSize: true } });
       await assertNotDuplicate(this.prisma, { ...current, ...data }, id);
     }
     const product = await this.prisma.product.update({

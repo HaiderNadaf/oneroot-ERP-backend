@@ -3,7 +3,7 @@ import { IsArray, IsBoolean, IsOptional } from 'class-validator';
 import { BranchId, Can, CurrentUser, type AuthUser } from '../common/decorators.js';
 import { SKU_SEQ_KEY, formatSku } from '../common/sku.js';
 import { PrismaService } from '../prisma/prisma.service.js';
-import { ProductsModule, ProductsService } from './products.module.js';
+import { ProductsModule, ProductsService, assertNotDuplicate, sameProduct } from './products.module.js';
 
 export class ImportDto {
   @IsArray() rows: Record<string, unknown>[];
@@ -80,6 +80,8 @@ export class ImportService {
     };
     const results: RowResult[] = [];
     const seenSkus = new Set<string>();
+    /** Name + pack size of the new products earlier in the file */
+    const seenProducts: { name: string; packSize: string }[] = [];
     const seenBarcodes = new Set<string>();
     let created = 0;
     let updated = 0;
@@ -182,6 +184,11 @@ export class ImportService {
           if (!catRaw) res.errors.push('Category and Sub-Category are required for a new product');
         }
         if (nums.salePrice === undefined) res.errors.push('Selling price is required for a new product');
+        // Same name + pack size as a product already saved, or as a new one earlier in the file
+        const me = { name, packSize: str(r.packSize) };
+        if (seenProducts.some((o) => sameProduct(o, me))) res.errors.push(`${name} ${me.packSize} appears twice in the file`);
+        else await assertNotDuplicate(this.prisma, me).catch((e: Error) => res.errors.push(e.message));
+        seenProducts.push(me);
       }
 
       if (res.errors.length) {

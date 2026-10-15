@@ -35,6 +35,8 @@ import { AgentsModule } from './agents/agents.module.js';
 import { VendorsModule } from './vendors/vendors.module.js';
 import { SmsModule } from './sms/sms.module.js';
 import { StorageModule } from './storage/storage.module.js';
+import { HealthModule } from './health/health.module.js';
+import { RetryReadsOnDbBlip } from './common/db-retry.interceptor.js';
 
 @Module({
   imports: [
@@ -46,6 +48,7 @@ import { StorageModule } from './storage/storage.module.js';
     }),
     PrismaModule,
     StorageModule,
+    HealthModule,
     AuditModule,
     AccountingModule,
     NotificationsModule,
@@ -79,6 +82,7 @@ import { StorageModule } from './storage/storage.module.js';
   providers: [
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_INTERCEPTOR, useClass: InvalidateOnWrite },
+    { provide: APP_INTERCEPTOR, useClass: RetryReadsOnDbBlip },
   ],
 })
 export class AppModule {}

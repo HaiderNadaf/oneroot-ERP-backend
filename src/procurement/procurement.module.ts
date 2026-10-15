@@ -35,6 +35,8 @@ import {
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
+import { isInterState, ourGstPlace, splitGst, stateCodeOf, GST_STATES } from '../common/gst.js';
+import { hasPerm } from '../common/permissions.js';
 import {
   docDate,
   nextDocNo,
@@ -304,6 +306,29 @@ export function chargesGst(charges: number, gstRate: number = CHARGES_GST_RATE) 
   return charges > 0 ? round2((charges * gstRate) / 100) : 0;
 }
 
+/**
+ * Place of supply for a PO: the vendor's state (from its GSTIN, else its state field) against the delivery branch's
+ * (its GSTIN / state, else the store's). Another state = IGST; same state, or either side unknown = CGST + SGST.
+ */
+export async function poGstPlace(db: Tx, vendorId: string, branchId: string | null | undefined) {
+  const [vendor, branch, store] = await Promise.all([
+    db.vendor.findUnique({ where: { id: vendorId }, select: { gstin: true, state: true } }),
+    branchId ? db.branch.findUnique({ where: { id: branchId }, select: { gstin: true, state: true } }) : null,
+    db.storeSettings.findUnique({ where: { id: 1 }, select: { gstin: true, state: true, stateCode: true } }),
+  ]);
+  if (!vendor) throw new BadRequestException('Vendor not found');
+  const ours = ourGstPlace(branch, store);
+  const vendorCode = stateCodeOf(vendor);
+  const ourCode = ours ? stateCodeOf(ours) : undefined;
+  const interState = isInterState(vendor, ours) ?? false;
+  return {
+    isInterState: interState,
+    gstType: interState ? ('IGST' as const) : ('CGST_SGST' as const),
+    vendorState: vendorCode ? GST_STATES[vendorCode] : null,
+    branchState: ourCode ? GST_STATES[ourCode] : null,
+  };
+}
+
 const signature = (
   items: { productId: string; quantity: unknown; rate: unknown; discountPct?: unknown }[],
 ) =>
@@ -502,6 +527,10 @@ export class ProcurementService {
       },
     });
     const chain = await this.chainView(po);
+    // Purchase staff see every PO; anyone else only the POs they are named on as an approver
+    if (!hasPerm(user, 'purchases.view', 'purchases.approve', 'purchases.receive') && !chain.some((s) => s.approverId === user.id)) {
+      throw new ForbiddenException('You do not have access to this purchase order');
+    }
     const current =
       po.status === 'PENDING_APPROVAL' ? chain[po.level] : undefined;
     return {
@@ -513,6 +542,10 @@ export class ProcurementService {
       canEdit: EDITABLE.includes(po.status) && receivedPct(po.items) === 0,
       items: po.items.map((i) => ({ ...i, pendingQty: pendingQty(i) })),
     };
+  }
+
+  gstPlace(vendorId: string, branchId: string | null) {
+    return poGstPlace(this.prisma, vendorId, branchId);
   }
 
   async savePo(id: string | null, dto: SavePoDto, user: AuthUser, currentBranch: string | null = null) {
@@ -537,6 +570,10 @@ export class ProcurementService {
       const totalAmount = Math.round(raw);
       const roundOff = round2(totalAmount - raw);
       const chain = await this.approvals.chainFor(totalAmount, tx);
+      // Same state as the delivery branch: CGST + SGST; vendor GSTIN from another state: IGST only
+      const deliveryBranch =
+        dto.branchId ?? (id ? (await tx.purchaseOrder.findUnique({ where: { id }, select: { branchId: true } }))?.branchId : currentBranch);
+      const { isInterState: interState } = await poGstPlace(tx, dto.vendorId, deliveryBranch);
       const header = {
         vendorId: dto.vendorId,
         ...(dto.branchId ? { branchId: dto.branchId } : {}),
@@ -552,6 +589,8 @@ export class ProcurementService {
         notes: dto.notes || null,
         subtotal,
         taxAmount,
+        isInterState: interState,
+        ...splitGst(taxAmount, interState),
         totalAmount,
       };
       const itemRows = lines.map(({ taxable: _t, ...l }) => l);
@@ -1761,6 +1800,14 @@ export class PurchaseOrdersController {
   @Get('approvals/count')
   approvalCount(@CurrentUser() user: AuthUser) {
     return this.svc.myApprovalCount(user);
+  }
+
+  /** For the PO form: whether this vendor + delivery branch is billed CGST + SGST or IGST */
+  @Get('gst-type')
+  @Can('purchases.manage')
+  gstType(@Query('vendorId') vendorId: string, @Query('branchId') branchId: string | undefined, @BranchId() current: string | null) {
+    if (!vendorId) throw new BadRequestException('Choose a vendor');
+    return this.svc.gstPlace(vendorId, branchId || current);
   }
 
   @Get(':id')

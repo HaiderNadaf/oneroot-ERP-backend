@@ -81,3 +81,22 @@ export function isInterState(
   const b = store ? stateCodeOf(store) : undefined;
   return a && b ? a !== b : undefined;
 }
+
+/** Our side of a document: the branch's own GSTIN / state when it has one, else the store's */
+export function ourGstPlace(
+  branch: { gstin?: string | null; state?: string | null } | null | undefined,
+  store: { gstin?: string | null; state?: string | null; stateCode?: string | null } | null | undefined,
+) {
+  return branch && (branch.gstin || branch.state) ? branch : (store ?? null);
+}
+
+/**
+ * Splits a GST amount by place of supply: same state = CGST + SGST (half each, CGST takes the odd paisa),
+ * another state = IGST only.
+ */
+export function splitGst(taxAmount: number, interState: boolean) {
+  const tax = Math.round(taxAmount * 100) / 100;
+  if (interState) return { cgst: 0, sgst: 0, igst: tax };
+  const cgst = Math.round((tax / 2) * 100) / 100;
+  return { cgst, sgst: Math.round((tax - cgst) * 100) / 100, igst: 0 };
+}

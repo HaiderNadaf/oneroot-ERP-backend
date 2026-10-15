@@ -13,6 +13,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import { runAtStartup } from '../common/db-errors.js';
 import { PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsBoolean, IsEmail, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, Min } from 'class-validator';
@@ -203,7 +204,11 @@ export class GstStateBackfill implements OnApplicationBootstrap {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async onApplicationBootstrap() {
+  onApplicationBootstrap() {
+    runAtStartup(this.logger, 'State back-fill from GSTIN', () => this.fillStates());
+  }
+
+  private async fillStates() {
     const format = /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
     let filled = 0;
     const empty = { OR: [{ state: null }, { state: '' }], gstin: { not: null } };

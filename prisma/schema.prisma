@@ -162,20 +162,25 @@ enum ReminderChannel {
 // ───────────────────────── Admin ─────────────────────────
 
 model User {
-  id           String    @id @default(cuid())
-  name         String
-  email        String    @unique
-  phone        String?
-  passwordHash String
+  id                 String    @id @default(cuid())
+  name               String
+  email              String    @unique
+  phone              String?
+  passwordHash       String
   /// Approval PIN (hashed) for managers who sign off counter overrides
-  pinHash      String?
-  role         Role      @default(CASHIER)
-  /// What this user may do (keys from src/common/permissions.ts); a role only sets the starting ticks
-  permissions  String[]  @default([])
-  isActive     Boolean   @default(true)
-  lastLoginAt  DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  pinHash            String?
+  role               Role      @default(CASHIER)
+  /// What this user may do, worked out = role's permissions + extraPermissions − revokedPermissions (see common/access.ts).
+  /// Stored so every check and "who may approve" query reads one column; recomputed whenever the role or overrides change
+  permissions        String[]  @default([])
+  /// Ticked for this user on top of their role
+  extraPermissions   String[]  @default([])
+  /// Taken away from this user although their role has them
+  revokedPermissions String[]  @default([])
+  isActive           Boolean   @default(true)
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   sales     Sale[]
   purchases Purchase[]
@@ -211,6 +216,13 @@ model Department {
   updatedAt   DateTime @updatedAt
 
   roles RoleTemplate[]
+}
+
+/// Permissions of a built-in role (MANAGER / ACCOUNTANT / CASHIER); ADMIN needs none. Seeded from the defaults in permissions.ts
+model RolePermission {
+  role        Role     @id
+  permissions String[] @default([])
+  updatedAt   DateTime @updatedAt
 }
 
 model RoleTemplate {
@@ -635,6 +647,12 @@ model PurchaseOrder {
   status              PurchaseOrderStatus @default(DRAFT)
   subtotal            Decimal             @default(0) @db.Decimal(14, 2)
   taxAmount           Decimal             @default(0) @db.Decimal(14, 2)
+  /// Vendor's GSTIN state differs from the delivery branch's state: GST is IGST only (else CGST + SGST)
+  isInterState        Boolean             @default(false)
+  /// taxAmount split by place of supply: cgst + sgst (same state) or igst (another state)
+  cgst                Decimal             @default(0) @db.Decimal(14, 2)
+  sgst                Decimal             @default(0) @db.Decimal(14, 2)
+  igst                Decimal             @default(0) @db.Decimal(14, 2)
   /// Freight / transportation on this order, before GST (taxed at transportGstRate)
   transportCharges    Decimal             @default(0) @db.Decimal(14, 2)
   /// GST % on the transportation charges (18 unless chosen otherwise)

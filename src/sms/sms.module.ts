@@ -1,5 +1,6 @@
 import { Body, Controller, Global, Module, Post } from '@nestjs/common';
 import { IsString, MaxLength, MinLength } from 'class-validator';
+import { Can } from '../common/decorators.js';
 import { SmsService } from './sms.service.js';
 
 export { SmsService } from './sms.service.js';
@@ -23,7 +24,9 @@ export class SendSmsDto {
 export class SmsController {
   constructor(private readonly sms: SmsService) {}
 
+  /** Free-text SMS to any number: limited to staff who may send customer reminders */
   @Post('send')
+  @Can('customers.remind')
   sendSms(@Body() dto: SendSmsDto) {
     return this.sms.send(dto.to, dto.message);
   }

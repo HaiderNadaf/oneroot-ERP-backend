@@ -10,6 +10,7 @@ import {
   Post,
   UnauthorizedException,
 } from '@nestjs/common';
+import { runAtStartup } from '../common/db-errors.js';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { IsEmail, IsString, MinLength } from 'class-validator';
@@ -45,7 +46,11 @@ export class AuthService implements OnApplicationBootstrap {
   ) {}
 
   /** First run: create the admin account, store profile and default expense categories (product categories: CategoriesModule) */
-  async onApplicationBootstrap() {
+  onApplicationBootstrap() {
+    runAtStartup(this.logger, 'First-run setup', () => this.firstRun());
+  }
+
+  private async firstRun() {
     if ((await this.prisma.user.count()) > 0) return;
     const email = process.env.ADMIN_EMAIL ?? 'admin@oneroot.farm';
     const password = process.env.ADMIN_PASSWORD ?? 'admin123';

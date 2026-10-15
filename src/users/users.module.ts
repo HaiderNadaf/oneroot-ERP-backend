@@ -16,7 +16,8 @@ import { AuditService } from '../audit/audit.service.js';
 import { Can, CurrentUser, type AuthUser } from '../common/decorators.js';
 import { Role } from '../generated/prisma/enums.js';
 import { userCache } from '../common/cache.js';
-import { PERMISSIONS, defaultsFor, hasPerm, isPermission, normalizePermissions, type Permission } from '../common/permissions.js';
+import { basePermissions, overridesFor } from '../common/access.js';
+import { PERMISSIONS, hasPerm, isPermission, normalizePermissions, type Permission } from '../common/permissions.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
 class CreateUserDto {
@@ -29,7 +30,7 @@ class CreateUserDto {
   @IsEnum(Role) role: Role;
   /** A custom role (named set of ticks); its base role overrides `role` */
   @IsOptional() @IsString() roleTemplateId?: string | null;
-  /** Ticks from the permission list; omitted = the custom role's / built-in role's defaults */
+  /** The user's full set of ticks; what differs from the role is kept as their extras / removals. Omitted = exactly the role */
   @IsOptional() @IsArray() @IsString({ each: true }) permissions?: string[];
 }
 
@@ -55,6 +56,8 @@ const publicFields = {
   roleTemplateId: true,
   roleTemplate: { select: { id: true, name: true, department: { select: { id: true, name: true } } } },
   permissions: true,
+  extraPermissions: true,
+  revokedPermissions: true,
   branchId: true,
   branch: { select: { id: true, code: true, name: true } },
   isActive: true,
@@ -94,25 +97,26 @@ export class UsersService {
   }
 
   /**
-   * Ticks to store: the given list (unknown keys rejected), else the custom role's ticks, else the
-   * built-in role's defaults. Administrators need no ticks. A delegated user manager may only hand
-   * out what they hold themselves.
+   * Access to store for a user with this role: the given ticks (unknown keys rejected), else exactly the role's.
+   * Returns the full set plus the extras / removals against the role, so later role changes still apply to them.
+   * Administrators need no ticks. A delegated user manager may only hand out what they hold themselves.
    */
-  private resolvePermissions(role: Role, wanted: string[] | undefined, fallback: string[] | null, by: AuthUser): Permission[] {
+  private async resolveAccess(role: Role, roleTemplateId: string | null, wanted: string[] | undefined, by: AuthUser) {
     if (role === 'ADMIN') {
       if (by.role !== 'ADMIN') throw new ForbiddenException('Only an administrator can make someone an administrator');
-      return [];
+      return { permissions: [] as Permission[], extraPermissions: [] as Permission[], revokedPermissions: [] as Permission[] };
     }
     if (wanted) {
       const unknown = wanted.filter((k) => !isPermission(k));
       if (unknown.length) throw new BadRequestException(`Unknown permission: ${unknown.join(', ')}`);
     }
-    const perms = normalizePermissions(wanted ?? fallback ?? defaultsFor(role));
+    const base = await basePermissions(this.prisma, { role, roleTemplateId });
+    const permissions = wanted ? normalizePermissions(wanted) : base;
     if (by.role !== 'ADMIN') {
-      const beyond = perms.filter((k) => !by.permissions.includes(k));
+      const beyond = permissions.filter((k) => !by.permissions.includes(k));
       if (beyond.length) throw new ForbiddenException(`You cannot grant what you do not have yourself: ${beyond.join(', ')}`);
     }
-    return perms;
+    return { permissions, ...overridesFor(base, permissions) };
   }
 
   async create(dto: CreateUserDto, by: AuthUser) {
@@ -122,7 +126,8 @@ export class UsersService {
     }
     const tpl = await this.template(dto.roleTemplateId);
     const role = tpl?.baseRole ?? dto.role;
-    const permissions = this.resolvePermissions(role, dto.permissions, tpl?.permissions ?? null, by);
+    const access = await this.resolveAccess(role, role === 'ADMIN' ? null : (tpl?.id ?? null), dto.permissions, by);
+    const { permissions } = access;
     const user = await this.prisma.user.create({
       data: {
         name: dto.name,
@@ -130,13 +135,13 @@ export class UsersService {
         phone: dto.phone,
         role,
         roleTemplateId: tpl?.id ?? null,
-        permissions,
+        ...access,
         branchId: dto.branchId || null,
         passwordHash: await bcrypt.hash(dto.password, 10),
       },
       select: publicFields,
     });
-    await this.audit.log(by.id, 'CREATE', 'User', user.id, { email, role, roleTemplate: tpl?.name, permissions });
+    await this.audit.log(by.id, 'CREATE', 'User', user.id, { email, role, roleTemplate: tpl?.name, permissions, extraPermissions: access.extraPermissions, revokedPermissions: access.revokedPermissions });
     return strip(user);
   }
 
@@ -149,11 +154,16 @@ export class UsersService {
       throw new ForbiddenException('Only an administrator can edit an administrator');
     }
     const { password, pin, permissions: wanted, roleTemplateId, ...rest } = dto;
-    const tpl = await this.template(roleTemplateId);
+    // Custom role: as sent; not sent = kept, unless the built-in role changes (a custom role carries its own)
+    const templateId =
+      roleTemplateId !== undefined ? roleTemplateId || null : rest.role && rest.role !== current.role ? null : current.roleTemplateId;
+    const tpl = await this.template(templateId);
     const role = tpl?.baseRole ?? rest.role ?? current.role;
-    const roleChanged = role !== current.role || (roleTemplateId !== undefined && (roleTemplateId || null) !== current.roleTemplateId);
-    // Ticks: as given; otherwise a role change resets them to the new role's ticks
-    const permissions = wanted !== undefined || roleChanged ? this.resolvePermissions(role, wanted, tpl?.permissions ?? null, by) : undefined;
+    const roleChanged = role !== current.role || templateId !== current.roleTemplateId;
+    // Ticks: as given; otherwise a role change resets them to exactly the new role
+    const access =
+      wanted !== undefined || roleChanged ? await this.resolveAccess(role, role === 'ADMIN' ? null : (tpl?.id ?? null), wanted, by) : undefined;
+    const permissions = access?.permissions;
     if (pin && !mayHoldPin({ role, permissions: permissions ?? current.permissions })) {
       throw new BadRequestException('Only users who may approve overrides can hold an approval PIN');
     }
@@ -163,8 +173,8 @@ export class UsersService {
       data: {
         ...rest,
         role,
-        ...(roleTemplateId !== undefined ? { roleTemplateId: roleTemplateId || null } : {}),
-        ...(permissions !== undefined ? { permissions } : {}),
+        ...(roleChanged ? { roleTemplateId: role === 'ADMIN' ? null : templateId } : {}),
+        ...access,
         ...(rest.branchId !== undefined ? { branchId: rest.branchId || null } : {}),
         ...(password ? { passwordHash: await bcrypt.hash(password, 10) } : {}),
         // Approval PIN: set with digits, cleared with an empty string
@@ -173,7 +183,7 @@ export class UsersService {
       select: publicFields,
     });
     userCache.delete(id);
-    await this.audit.log(by.id, 'UPDATE', 'User', id, { ...rest, role, roleTemplate: tpl?.name, permissions, passwordChanged: !!password, pinChanged: pin !== undefined });
+    await this.audit.log(by.id, 'UPDATE', 'User', id, { ...rest, role, roleTemplate: tpl?.name, permissions, extraPermissions: access?.extraPermissions, revokedPermissions: access?.revokedPermissions, passwordChanged: !!password, pinChanged: pin !== undefined });
     return strip(user);
   }
 }

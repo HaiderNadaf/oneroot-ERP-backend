@@ -12,7 +12,9 @@ import {
   Post,
   Put,
   Query,
+  Logger,
 } from '@nestjs/common';
+import { runAtStartup } from '../common/db-errors.js';
 import * as bcrypt from 'bcrypt';
 import { Type } from 'class-transformer';
 import { IsBoolean, IsEnum, IsIn, IsNumber, IsObject, IsOptional, IsString, Matches, Min } from 'class-validator';
@@ -102,10 +104,12 @@ export class ApprovalsService implements OnApplicationBootstrap {
     private readonly notifications: NotificationsService,
   ) {}
 
-  async onApplicationBootstrap() {
-    for (const role of Object.keys(DEFAULT_LIMITS) as Role[]) {
-      await this.prisma.roleLimit.upsert({ where: { role }, create: { role, ...DEFAULT_LIMITS[role] }, update: {} }).catch(() => {});
-    }
+  onApplicationBootstrap() {
+    runAtStartup(new Logger('Approvals'), 'Role limits setup', async () => {
+      for (const role of Object.keys(DEFAULT_LIMITS) as Role[]) {
+        await this.prisma.roleLimit.upsert({ where: { role }, create: { role, ...DEFAULT_LIMITS[role] }, update: {} });
+      }
+    });
   }
 
   async limits(db: Db = this.prisma) {

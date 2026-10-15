@@ -12,6 +12,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { Response } from 'express';
 import compression from 'compression';
 import { AppModule } from './app.module.js';
+import { isTransientDbError, lastLine } from './common/db-errors.js';
 import { Prisma } from './generated/prisma/client.js';
 
 /** Turns Prisma errors into readable 4xx responses instead of generic 500s */
@@ -23,6 +24,13 @@ class AllExceptionsFilter implements ExceptionFilter {
     const res = host.switchToHttp().getResponse<Response>();
     if (exception instanceof HttpException) {
       res.status(exception.getStatus()).json(exception.getResponse());
+      return;
+    }
+    // The database dropped out for a moment (asleep, network blip): ask to try again instead of a bare 500
+    if (isTransientDbError(exception)) {
+      this.logger.warn(`Database unavailable: ${lastLine(exception)}`);
+      res.setHeader('Retry-After', '2');
+      res.status(503).json({ statusCode: 503, message: 'The database is busy or waking up — please try again in a moment' });
       return;
     }
     if (exception instanceof Prisma.PrismaClientKnownRequestError) {
@@ -62,8 +70,15 @@ function corsOrigin(setting = 'http://localhost:3000') {
   };
 }
 
+// A promise that fails with nobody waiting on it (e.g. a fire-and-forget notification) must not take the API down
+process.on('unhandledRejection', (reason) => {
+  Logger.error(reason instanceof Error ? (reason.stack ?? reason.message) : String(reason), 'UnhandledRejection');
+});
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  // Close database connections cleanly on restart / deploy (SIGTERM)
+  app.enableShutdownHooks();
   app.setGlobalPrefix('api');
   // gzip JSON responses (lists shrink 70-80%)
   app.use(compression());

@@ -13,11 +13,12 @@ import {
 } from '@nestjs/common';
 import { IsArray, IsBoolean, IsEnum, IsOptional, IsString, MinLength } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
-import { userCache } from '../common/cache.js';
+import { EDITABLE_ROLES, refreshUsers, rolePermissions } from '../common/access.js';
 import { Can, CurrentUser, type AuthUser } from '../common/decorators.js';
-import { isPermission, normalizePermissions, type Permission } from '../common/permissions.js';
+import { defaultsFor, isPermission, normalizePermissions, type Permission } from '../common/permissions.js';
 import { Role } from '../generated/prisma/enums.js';
-import { PrismaService } from '../prisma/prisma.service.js';
+import { userCache } from '../common/cache.js';
+import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 
 class RoleTemplateDto {
   @IsString() @MinLength(2) name: string;
@@ -27,8 +28,12 @@ class RoleTemplateDto {
   /** Built-in role that supplies the authority limits (never ADMIN) */
   @IsEnum(Role) baseRole: Role;
   @IsArray() @IsString({ each: true }) permissions: string[];
-  /** On update: also set every user holding this role to these ticks */
+  /** Ignored: a role's users always follow it (keeping their own extras / removals) */
   @IsOptional() @IsBoolean() applyToUsers?: boolean;
+}
+
+class RolePermissionsDto {
+  @IsArray() @IsString({ each: true }) permissions: string[];
 }
 
 class DepartmentDto {
@@ -65,9 +70,13 @@ export class RolesService {
   private check(dto: RoleTemplateDto, by: AuthUser): Permission[] {
     if (dto.baseRole === 'ADMIN') throw new BadRequestException('A custom role cannot be based on Administrator — administrators can do everything anyway');
     if (BUILT_IN.has(dto.name.trim().toUpperCase())) throw new BadRequestException('That name is taken by a built-in role');
-    const unknown = dto.permissions.filter((k) => !isPermission(k));
+    return this.checkPermissions(dto.permissions, by);
+  }
+
+  private checkPermissions(keys: string[], by: AuthUser): Permission[] {
+    const unknown = keys.filter((k) => !isPermission(k));
     if (unknown.length) throw new BadRequestException(`Unknown permission: ${unknown.join(', ')}`);
-    const perms = normalizePermissions(dto.permissions);
+    const perms = normalizePermissions(keys);
     if (!perms.length) throw new BadRequestException('Tick at least one permission');
     if (by.role !== 'ADMIN') {
       const beyond = perms.filter((k) => !by.permissions.includes(k));
@@ -110,14 +119,13 @@ export class RolesService {
         data: { name, description: dto.description?.trim() || null, departmentId, baseRole: dto.baseRole, permissions },
         include: ROLE_INCLUDE,
       });
-      if (dto.applyToUsers) {
-        await tx.user.updateMany({ where: { roleTemplateId: id }, data: { role: dto.baseRole, permissions } });
-      }
+      // Everyone holding the role follows it, keeping their own extras / removals
+      await tx.user.updateMany({ where: { roleTemplateId: id }, data: { role: dto.baseRole } });
+      await refreshUsers(tx, { roleTemplateId: id });
       return r;
-    });
-    // Everyone holding the role may have new ticks: drop the cached sessions
+    }, TX_OPTIONS);
     userCache.clear();
-    await this.audit.log(by.id, 'UPDATE', 'RoleTemplate', id, { name, department: row.department?.name ?? null, baseRole: dto.baseRole, permissions, applyToUsers: !!dto.applyToUsers });
+    await this.audit.log(by.id, 'UPDATE', 'RoleTemplate', id, { name, department: row.department?.name ?? null, baseRole: dto.baseRole, permissions });
     return shapeRole(row);
   }
 
@@ -129,6 +137,35 @@ export class RolesService {
     await this.prisma.roleTemplate.delete({ where: { id } });
     await this.audit.log(by.id, 'DELETE', 'RoleTemplate', id, { name: row.name });
     return { ok: true };
+  }
+
+  // ───────────── Built-in roles ─────────────
+
+  /** Manager / Accountant / Cashier with their permissions, the catalogue defaults and how many users follow each */
+  async listBuiltIn() {
+    const counts = await this.prisma.user.groupBy({ by: ['role'], where: { roleTemplateId: null }, _count: { _all: true } });
+    return Promise.all(
+      EDITABLE_ROLES.map(async (role) => ({
+        role,
+        permissions: await rolePermissions(this.prisma, role),
+        defaults: defaultsFor(role),
+        userCount: counts.find((c) => c.role === role)?._count._all ?? 0,
+      })),
+    );
+  }
+
+  /** New permissions for a built-in role: every user on it (without a custom role) follows, keeping their extras / removals */
+  async updateBuiltIn(role: string, dto: RolePermissionsDto, by: AuthUser) {
+    if (!(EDITABLE_ROLES as readonly string[]).includes(role)) throw new BadRequestException('Only Manager, Accountant and Cashier can be edited — administrators can do everything');
+    const r = role as (typeof EDITABLE_ROLES)[number];
+    const permissions = this.checkPermissions(dto.permissions, by);
+    const users = await this.prisma.$transaction(async (tx) => {
+      await tx.rolePermission.upsert({ where: { role: r }, create: { role: r, permissions }, update: { permissions } });
+      return refreshUsers(tx, { role: r, roleTemplateId: null });
+    }, TX_OPTIONS);
+    userCache.clear();
+    await this.audit.log(by.id, 'UPDATE', 'RolePermission', r, { permissions, users });
+    return { role: r, permissions, defaults: defaultsFor(r), userCount: users };
   }
 
   // ───────────── Departments ─────────────
@@ -200,6 +237,24 @@ export class RoleTemplatesController {
   }
 }
 
+@Controller('roles/built-in')
+export class BuiltInRolesController {
+  constructor(private readonly roles: RolesService) {}
+
+  /** The user form needs each role's permissions to show what is extra or removed */
+  @Get()
+  @Can('admin.roles', 'admin.users')
+  list() {
+    return this.roles.listBuiltIn();
+  }
+
+  @Put(':role')
+  @Can('admin.roles')
+  update(@Param('role') role: string, @Body() dto: RolePermissionsDto, @CurrentUser() user: AuthUser) {
+    return this.roles.updateBuiltIn(role, dto, user);
+  }
+}
+
 @Controller('departments')
 export class DepartmentsController {
   constructor(private readonly roles: RolesService) {}
@@ -230,7 +285,7 @@ export class DepartmentsController {
 }
 
 @Module({
-  controllers: [RoleTemplatesController, DepartmentsController],
+  controllers: [RoleTemplatesController, BuiltInRolesController, DepartmentsController],
   providers: [RolesService],
   exports: [RolesService],
 })

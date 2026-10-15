@@ -24,6 +24,8 @@
     "migrate:deploy": "prisma migrate deploy"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1152.0",
+    "@aws-sdk/s3-request-presigner": "^3.1152.0",
     "@nestjs/common": "^12.0.1",
     "@nestjs/config": "^12.0.1",
     "@nestjs/core": "^12.0.1",
@@ -33,10 +35,11 @@
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "bcrypt": "^6.0.0",
+    "bwip-js": "^4.11.4",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "compression": "^1.8.2",
-    "dotenv": "^18.0.6",
+    "dotenv": "^18.0.8",
     "ioredis": "^6.0.0",
     "pg": "^8.23.1",
     "prisma": "^7.10.0",

@@ -133,12 +133,12 @@ export class InventoryService {
   lowStock(branchId: string | null = null) {
     type Row = { id: string; name: string; sku: string; unit: string; stock: string; reorderLevel: string; purchasePrice: string; gstRate: string };
     if (!branchId) {
-      return this.prisma.$queryRaw<Row[]>`SELECT id, name, sku, unit, stock, "reorderLevel", "purchasePrice", "gstRate" FROM "Product"
+      return this.prisma.$queryRaw<Row[]>`SELECT id, name, sku_code AS sku, unit, stock, "reorderLevel", "purchasePrice", "gstRate" FROM "Product"
         WHERE "isActive" = true AND "reorderLevel" > 0 AND stock <= "reorderLevel"
         ORDER BY stock - "reorderLevel" ASC`;
     }
     return this.prisma.$queryRaw<Row[]>`
-      SELECT p.id, p.name, p.sku, p.unit, COALESCE(SUM(b.quantity), 0) AS stock, p."reorderLevel", p."purchasePrice", p."gstRate"
+      SELECT p.id, p.name, p.sku_code AS sku, p.unit, COALESCE(SUM(b.quantity), 0) AS stock, p."reorderLevel", p."purchasePrice", p."gstRate"
       FROM "Product" p LEFT JOIN "Batch" b ON b."productId" = p.id AND b."branchId" = ${branchId}
       WHERE p."isActive" = true AND p."reorderLevel" > 0
       GROUP BY p.id

@@ -416,41 +416,43 @@ model SubCategory {
 }
 
 model Product {
-  id            String       @id @default(cuid())
-  sku           String       @unique
-  barcode       String?      @unique
-  name          String
-  type          ProductType  @default(OTHER)
-  categoryId    String?
-  category      Category?    @relation(fields: [categoryId], references: [id])
-  subCategoryId String?
-  subCategory   SubCategory? @relation(fields: [subCategoryId], references: [id])
-  brand         String?
-  manufacturer  String?
-  technicalName String? // active ingredient / composition, e.g. "Imidacloprid 17.8% SL"
-  description   String?
-  hsnCode       String?
-  gstRate       Decimal      @default(0) @db.Decimal(5, 2)
-  unit          String       @default("NOS") // KG, LTR, BAG, PKT, NOS, ML, GM
-  packSize      String? // e.g. "50 kg bag", "250 ml"
-  mrp           Decimal      @default(0) @db.Decimal(12, 2)
-  salePrice     Decimal      @default(0) @db.Decimal(12, 2)
-  purchasePrice Decimal      @default(0) @db.Decimal(12, 2)
-  reorderLevel  Decimal      @default(0) @db.Decimal(12, 3)
-  trackBatch    Boolean      @default(true)
+  id              String       @id @default(cuid())
+  sku             String       @unique @map("sku_code")
+  barcode         String?      @unique @map("barcode")
+  /// Stored location of the generated barcode PNG (object storage); GET responses hand out a signed link instead
+  barcodeImageUrl String?      @map("barcode_image_url")
+  name            String
+  type            ProductType  @default(OTHER)
+  categoryId      String?
+  category        Category?    @relation(fields: [categoryId], references: [id])
+  subCategoryId   String?
+  subCategory     SubCategory? @relation(fields: [subCategoryId], references: [id])
+  brand           String?
+  manufacturer    String?
+  technicalName   String? // active ingredient / composition, e.g. "Imidacloprid 17.8% SL"
+  description     String?
+  hsnCode         String?
+  gstRate         Decimal      @default(0) @db.Decimal(5, 2)
+  unit            String       @default("NOS") // KG, LTR, BAG, PKT, NOS, ML, GM
+  packSize        String? // e.g. "50 kg bag", "250 ml"
+  mrp             Decimal      @default(0) @db.Decimal(12, 2)
+  salePrice       Decimal      @default(0) @db.Decimal(12, 2)
+  purchasePrice   Decimal      @default(0) @db.Decimal(12, 2)
+  reorderLevel    Decimal      @default(0) @db.Decimal(12, 3)
+  trackBatch      Boolean      @default(true)
   /// Govt-subsidised fertiliser: every bill line needs the govt POS receipt no. and stock is matched with the portal
-  isSubsidised  Boolean      @default(false)
+  isSubsidised    Boolean      @default(false)
   /// Each unit carries a serial number (sprayers, pumps): bills pick the serials that leave
-  trackSerial   Boolean      @default(false)
+  trackSerial     Boolean      @default(false)
   /// Where it normally sits in the store: rack / bin / shelf
-  location      String?
+  location        String?
   /// Values for the category's extra fields, keyed by field key
-  attributes    Json?
-  isActive      Boolean      @default(true)
+  attributes      Json?
+  isActive        Boolean      @default(true)
   // Denormalised total stock, kept in sync with batches in the same transaction
-  stock         Decimal      @default(0) @db.Decimal(12, 3)
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  stock           Decimal      @default(0) @db.Decimal(12, 3)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
   batches            Batch[]
   stockMovements     StockMovement[]
@@ -622,45 +624,45 @@ model CustomerReminder {
 // ───────────────────────── Purchasing ─────────────────────────
 
 model PurchaseOrder {
-  id               String              @id @default(cuid())
-  poNo             String              @unique
-  vendorId         String
-  vendor           Vendor              @relation(fields: [vendorId], references: [id])
-  orderDate        DateTime            @default(now())
-  expectedDate     DateTime?
+  id                  String              @id @default(cuid())
+  poNo                String              @unique
+  vendorId            String
+  vendor              Vendor              @relation(fields: [vendorId], references: [id])
+  orderDate           DateTime            @default(now())
+  expectedDate        DateTime?
   /// How many days the PO stays valid: 7 or 14 (null on POs created before this was added)
-  expiryDays       Int?
-  status           PurchaseOrderStatus @default(DRAFT)
-  subtotal         Decimal             @default(0) @db.Decimal(14, 2)
-  taxAmount        Decimal             @default(0) @db.Decimal(14, 2)
+  expiryDays          Int?
+  status              PurchaseOrderStatus @default(DRAFT)
+  subtotal            Decimal             @default(0) @db.Decimal(14, 2)
+  taxAmount           Decimal             @default(0) @db.Decimal(14, 2)
   /// Freight / transportation on this order, before GST (taxed at transportGstRate)
-  transportCharges Decimal             @default(0) @db.Decimal(14, 2)
+  transportCharges    Decimal             @default(0) @db.Decimal(14, 2)
   /// GST % on the transportation charges (18 unless chosen otherwise)
-  transportGstRate Decimal             @default(18) @db.Decimal(5, 2)
+  transportGstRate    Decimal             @default(18) @db.Decimal(5, 2)
   /// Any other charges (loading, packing …); otherChargesNote says what they are
-  otherCharges     Decimal             @default(0) @db.Decimal(14, 2)
+  otherCharges        Decimal             @default(0) @db.Decimal(14, 2)
   /// GST % on the other charges (18 unless chosen otherwise)
-  otherChargesGstRate Decimal          @default(18) @db.Decimal(5, 2)
-  otherChargesNote String?
+  otherChargesGstRate Decimal             @default(18) @db.Decimal(5, 2)
+  otherChargesNote    String?
   /// Added to reach a whole-rupee total: .01–.49 rounds down, .50–.99 rounds up
-  roundOff         Decimal             @default(0) @db.Decimal(6, 2)
+  roundOff            Decimal             @default(0) @db.Decimal(6, 2)
   /// Items + charges (taxable value) plus GST on both, rounded to the rupee - decides the approval band
-  totalAmount      Decimal             @default(0) @db.Decimal(14, 2)
+  totalAmount         Decimal             @default(0) @db.Decimal(14, 2)
   /// Approval round: goes up when a sent-back or approved PO is edited and resubmitted
-  round            Int                 @default(1)
+  round               Int                 @default(1)
   /// Index of the approval step currently waiting (0-based)
-  level            Int                 @default(0)
+  level               Int                 @default(0)
   /// Number of approval steps this PO needs, fixed when it is submitted
-  levelsNeeded     Int                 @default(1)
+  levelsNeeded        Int                 @default(1)
   /// Snapshot of the approval chain taken at submission, so later rule changes don't re-route this PO
-  approvalChain    Json?
-  notes            String?
-  createdById      String?
-  createdBy        User?               @relation("PoCreatedBy", fields: [createdById], references: [id])
-  createdAt        DateTime            @default(now())
-  updatedAt        DateTime            @updatedAt
+  approvalChain       Json?
+  notes               String?
+  createdById         String?
+  createdBy           User?               @relation("PoCreatedBy", fields: [createdById], references: [id])
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
   /// Soft delete: set the day after an open PO expires (orderDate + expiryDays); hidden everywhere once set
-  deletedAt        DateTime?
+  deletedAt           DateTime?
 
   items      PurchaseOrderItem[]
   purchases  Purchase[]

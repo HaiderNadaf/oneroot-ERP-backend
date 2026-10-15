@@ -34,6 +34,7 @@ import { RolesModule } from './roles/roles.module.js';
 import { AgentsModule } from './agents/agents.module.js';
 import { VendorsModule } from './vendors/vendors.module.js';
 import { SmsModule } from './sms/sms.module.js';
+import { StorageModule } from './storage/storage.module.js';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { SmsModule } from './sms/sms.module.js';
       signOptions: { expiresIn: (process.env.JWT_EXPIRES_IN ?? '7d') as `${number}d` },
     }),
     PrismaModule,
+    StorageModule,
     AuditModule,
     AccountingModule,
     NotificationsModule,

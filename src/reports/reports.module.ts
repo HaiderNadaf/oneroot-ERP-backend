@@ -197,7 +197,7 @@ export class ReportsService {
     const rows = await this.prisma.$queryRaw<
       { id: string; sku: string; name: string; type: string; category: string | null; unit: string; stock: string; reorderLevel: string; salePrice: string; costValue: string | null }[]
     >`
-      SELECT p.id, p.sku, p.name, p.type::text AS type, c.name AS category, p.unit,
+      SELECT p.id, p.sku_code AS sku, p.name, p.type::text AS type, c.name AS category, p.unit,
              COALESCE((SELECT SUM(b.quantity) FROM "Batch" b WHERE b."productId" = p.id ${andBranch('b', branchId)}), 0) AS stock,
              p."reorderLevel", p."salePrice",
              (SELECT SUM(b.quantity * b."costPrice") FROM "Batch" b WHERE b."productId" = p.id AND b.quantity > 0 ${andBranch('b', branchId)}) AS "costValue"

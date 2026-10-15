@@ -1,3 +1,5 @@
+import { toBuffer } from 'bwip-js';
+
 /** EAN-13 check digit for the first 12 digits */
 export function ean13CheckDigit(d12: string) {
   let sum = 0;
@@ -14,4 +16,19 @@ export const isEan13 = (s: string) => /^\d{13}$/.test(s) && ean13CheckDigit(s.sl
 export function storeBarcode(seq: number) {
   const body = `2${String(seq).padStart(11, '0')}`;
   return body + ean13CheckDigit(body);
+}
+
+/** PNG of a barcode: EAN-13 when the code is a valid EAN-13, else Code 128 (any text), with the digits printed below */
+export function barcodePng(code: string) {
+  return toBuffer({
+    bcid: isEan13(code) ? 'ean13' : 'code128',
+    text: code,
+    scale: 3,
+    height: 12,
+    includetext: true,
+    textxalign: 'center',
+    paddingwidth: 10,
+    paddingheight: 6,
+    backgroundcolor: 'FFFFFF',
+  });
 }

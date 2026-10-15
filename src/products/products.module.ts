@@ -6,6 +6,7 @@ import {
   Delete,
   Get,
   Injectable,
+  Logger,
   Module,
   Param,
   Patch,
@@ -29,7 +30,7 @@ import {
 } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { storeBarcode } from '../common/barcode.js';
+import { barcodePng, storeBarcode } from '../common/barcode.js';
 import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
 import { nextSku, peekSku, withUniqueSku } from '../common/sku.js';
 import { paged, paging, startOfDay, type Paging } from '../common/utils.js';
@@ -37,6 +38,7 @@ import type { Prisma } from '../generated/prisma/client.js';
 import { ProductType } from '../generated/prisma/enums.js';
 import { StockService } from '../inventory/stock.service.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
+import { StorageService } from '../storage/storage.module.js';
 import { SerialsService } from './serials.module.js';
 
 class OpeningStockDto {
@@ -113,15 +115,47 @@ async function assertNotDuplicate(
   }
 }
 
+/** Next unused in-store EAN-13 barcode */
+async function allocateBarcode(db: Prisma.TransactionClient) {
+  let code = '';
+  do {
+    const seq = await db.sequence.upsert({ where: { key: 'BARCODE' }, create: { key: 'BARCODE', value: 1 }, update: { value: { increment: 1 } } });
+    code = storeBarcode(seq.value);
+  } while (await db.product.findUnique({ where: { barcode: code } }));
+  return code;
+}
+
 @Injectable()
 export class ProductsService {
+  private readonly logger = new Logger(ProductsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly stock: StockService,
     private readonly audit: AuditService,
     private readonly posting: PostingService,
     private readonly serials: SerialsService,
+    private readonly storage: StorageService,
   ) {}
+
+  /** GET response shape: the SKU goes out as skuCode (barcodeImageUrl is already a short public link) */
+  private toResponse<T extends { sku: string }>({ sku, ...rest }: T) {
+    return { ...rest, skuCode: sku };
+  }
+
+  /**
+   * Renders the product's barcode as a PNG, stores it in object storage and saves its URL (cleared when the product
+   * has no barcode). A storage failure is logged and leaves the URL as it was, so it never blocks saving the product.
+   */
+  private async saveBarcodeImage(id: string, barcode: string | null) {
+    try {
+      const url = barcode ? await this.storage.put(`barcodes/${encodeURIComponent(barcode)}.png`, await barcodePng(barcode), 'image/png') : null;
+      return await this.prisma.product.update({ where: { id }, data: { barcodeImageUrl: url } });
+    } catch (e) {
+      this.logger.warn(`Barcode image for product ${id} not saved: ${(e as Error).message}`);
+      return this.prisma.product.findUniqueOrThrow({ where: { id } });
+    }
+  }
 
   async list(
     q: Paging & {
@@ -198,11 +232,11 @@ export class ProductsService {
     const expiry = q.withExpiry === 'true' ? await this.expiryInfo(items.map((i) => i.id), branchId) : null;
     const withExp = <T extends { id: string }>(i: T) =>
       expiry ? { ...i, sellable: expiry.get(i.id)?.sellable ?? 0, nextExpiry: expiry.get(i.id)?.nextExpiry ?? null } : i;
-    if (!branchId) return paged(items.map(withExp), total, p);
+    if (!branchId) return paged(items.map((i) => this.toResponse(withExp(i))), total, p);
     // With a branch selected, `stock` is that branch's stock; `totalStock` is all branches
     const sums = await this.branchSums(items.map((i) => i.id), branchId);
     return paged(
-      items.map((i) => withExp({ ...i, totalStock: i.stock, stock: sums.get(i.id) ?? 0 })),
+      items.map((i) => this.toResponse(withExp({ ...i, totalStock: i.stock, stock: sums.get(i.id) ?? 0 }))),
       total,
       p,
     );
@@ -257,12 +291,12 @@ export class ProductsService {
         WHERE br."isActive" = true GROUP BY br.id ORDER BY br.name`,
     ]);
     const branchStock = perBranch.map((r) => ({ ...r, quantity: Number(r.quantity) }));
-    return {
+    return this.toResponse({
       ...product,
       totalStock: product.stock,
       stock: branchId ? (branchStock.find((b) => b.branchId === branchId)?.quantity ?? 0) : product.stock,
       branchStock,
-    };
+    });
   }
 
   /** SKU the next product in this sub-category would get — for the form preview */
@@ -275,15 +309,17 @@ export class ProductsService {
   async create(dto: CreateProductDto, user: AuthUser, branchId: string | null = null) {
     const { openingStock, sku: _typed, ...data } = dto;
     // The whole save is retried with the next number if a product saved at the same moment took this SKU
-    return withUniqueSku(() => this.prisma.$transaction(async (tx) => {
+    const saved = await withUniqueSku(() => this.prisma.$transaction(async (tx) => {
       // Same name + pack size + unit is the same product: refuse it
       await assertNotDuplicate(tx, data);
       // ORI + category code + sub-category code + running number; the tax type comes from the category
       const { sku, type, categoryId } = await nextSku(tx, data.subCategoryId);
       if (data.categoryId && data.categoryId !== categoryId) throw new BadRequestException('That sub-category belongs to another category');
       data.categoryId = categoryId;
+      // No barcode typed in: give it an in-store EAN-13
+      const barcode = data.barcode?.trim() || (await allocateBarcode(tx));
       const product = await tx.product.create({
-        data: { ...data, type: type ?? data.type ?? 'OTHER', sku, barcode: data.barcode || undefined, location: data.location?.trim() || undefined, attributes: data.attributes as Prisma.InputJsonValue | undefined },
+        data: { ...data, type: type ?? data.type ?? 'OTHER', sku, barcode, location: data.location?.trim() || undefined, attributes: data.attributes as Prisma.InputJsonValue | undefined },
       });
       if (openingStock?.quantity) {
         const unitCost = openingStock.unitCost ?? dto.purchasePrice ?? 0;
@@ -307,30 +343,32 @@ export class ProductsService {
         }
         await this.posting.postOpeningStock(tx, product, openingStock.quantity, unitCost, new Date(), branchId, user.id);
       }
-      await this.audit.log(user.id, 'CREATE', 'Product', product.id, { name: product.name, sku }, tx);
+      await this.audit.log(user.id, 'CREATE', 'Product', product.id, { name: product.name, sku, barcode }, tx);
       return tx.product.findUniqueOrThrow({ where: { id: product.id } });
     }, TX_OPTIONS));
+    // The image is uploaded after the product is committed, so a slow or failed upload never rolls the product back
+    return this.saveBarcodeImage(saved.id, saved.barcode);
   }
 
-  /** Gives a product an in-store EAN-13 barcode (kept if it already has one) */
+  /** Gives a product an in-store EAN-13 barcode (kept if it already has one) and its barcode image */
   async generateBarcode(id: string, user: AuthUser) {
-    return this.prisma.$transaction(async (tx) => {
+    const product = await this.prisma.$transaction(async (tx) => {
       const product = await tx.product.findUniqueOrThrow({ where: { id } });
       if (product.barcode) return product;
-      let code = '';
-      do {
-        const seq = await tx.sequence.upsert({ where: { key: 'BARCODE' }, create: { key: 'BARCODE', value: 1 }, update: { value: { increment: 1 } } });
-        code = storeBarcode(seq.value);
-      } while (await tx.product.findUnique({ where: { barcode: code } }));
+      const code = await allocateBarcode(tx);
       const saved = await tx.product.update({ where: { id }, data: { barcode: code } });
       await this.audit.log(user.id, 'UPDATE', 'Product', id, { barcode: code }, tx);
       return saved;
     }, TX_OPTIONS);
+    return product.barcodeImageUrl ? product : this.saveBarcodeImage(id, product.barcode);
   }
 
-  /** Barcodes for every active product that has none */
+  /** Barcodes and barcode images for every active product missing either */
   async generateMissingBarcodes(user: AuthUser) {
-    const missing = await this.prisma.product.findMany({ where: { barcode: null, isActive: true }, select: { id: true } });
+    const missing = await this.prisma.product.findMany({
+      where: { isActive: true, OR: [{ barcode: null }, { barcodeImageUrl: null }] },
+      select: { id: true },
+    });
     for (const p of missing) await this.generateBarcode(p.id, user);
     return { generated: missing.length };
   }
@@ -363,6 +401,9 @@ export class ProductsService {
       },
     });
     await this.audit.log(user.id, 'UPDATE', 'Product', id, { ...data, location, attributes: attributes as Prisma.InputJsonValue | undefined });
+    // A new barcode needs a new image; a removed one drops it
+    const imageKey = product.barcode ? `/barcodes/${encodeURIComponent(product.barcode)}.png` : null;
+    if (data.barcode !== undefined && !(imageKey && product.barcodeImageUrl?.endsWith(imageKey))) return this.saveBarcodeImage(id, product.barcode);
     return product;
   }
 

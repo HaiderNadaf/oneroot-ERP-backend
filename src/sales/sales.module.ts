@@ -60,6 +60,9 @@ import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 import { SerialsService } from '../products/serials.module.js';
 import { VanService } from '../van/van.module.js';
 
+/** Agent shown on sale lists and details (internal reference; the printed bill leaves it out) */
+const SALE_AGENT = { id: true, agentId: true, firstName: true, lastName: true } as const;
+
 class SaleItemDto {
   @IsString() productId: string;
   /** Sell from a specific batch; otherwise picked first-expiry-first-out */
@@ -123,6 +126,8 @@ class CreateSaleDto {
   @IsOptional() @IsString() managerPin?: string;
   /** Billed on a van trip in the villages: sold from the van's load */
   @IsOptional() @IsString() vanTripId?: string;
+  /** Agent who brought the sale in (internal reference, not printed) */
+  @IsOptional() @IsString() agentId?: string;
 }
 
 class ReturnItemDto {
@@ -207,6 +212,7 @@ export class SalesService {
         { customerPhone: { contains: q.search } },
         { customer: { name: { contains: q.search, mode: 'insensitive' } } },
         { customer: { phone: { contains: q.search } } },
+        { agent: { agentId: { contains: q.search, mode: 'insensitive' } } },
       ];
     }
     const [items, total, sum] = await Promise.all([
@@ -214,6 +220,7 @@ export class SalesService {
         where,
         include: {
           customer: { select: { id: true, name: true, phone: true } },
+          agent: { select: SALE_AGENT },
           user: { select: { name: true } },
           _count: { select: { items: true } },
         },
@@ -251,6 +258,7 @@ export class SalesService {
         payments: { orderBy: { paymentDate: 'asc' } },
         returns: { include: { items: true }, orderBy: { returnDate: 'asc' } },
         user: { select: { name: true } },
+        agent: { select: SALE_AGENT },
       },
     });
   }
@@ -288,6 +296,9 @@ export class SalesService {
       }
       // Subsidised fertiliser is sold on the government POS device first; its receipt no. goes on our bill
       const govtReceiptNo = dto.govtReceiptNo?.trim() || null;
+      const agentId = dto.agentId || null;
+      if (agentId && !(await tx.agent.findFirst({ where: { id: agentId, deletedAt: null }, select: { id: true } })))
+        throw new BadRequestException('That agent was deleted — choose another or leave it empty');
       if (products.some((p) => p.isSubsidised && dto.items.some((i) => i.productId === p.id)) && !govtReceiptNo) {
         throw new BadRequestException('Govt fertiliser POS receipt no. is required for subsidised fertiliser');
       }
@@ -544,6 +555,7 @@ export class SalesService {
           aadhaarVerified: !!dto.aadhaarVerified,
           customerTypeName: priced.typeApplied ? priced.customerTypeName : null,
           approvalId: approval?.id ?? null,
+          agentId,
           channel: trip ? 'VAN' : 'COUNTER',
           vanTripId: trip?.id ?? null,
           notes: dto.notes,

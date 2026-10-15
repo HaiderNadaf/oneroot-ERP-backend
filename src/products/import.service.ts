@@ -67,13 +67,13 @@ export class ImportService {
       list.find((c) => c.name.trim().toLowerCase() === raw.toLowerCase()) ?? list.find((c) => c.code === raw) ?? null;
     // Next running number (shared by all products), so the check step can show the SKU each new row will get
     let nextRun: number | undefined;
-    const predictSku = async () => {
+    const predictSku = async (categoryCode: string, subCategoryCode: string) => {
       if (nextRun === undefined) {
         const seq = await this.prisma.sequence.findUnique({ where: { key: SKU_SEQ_KEY } });
         nextRun = (seq?.value ?? 0) + 1;
       }
       try {
-        return formatSku(nextRun++);
+        return formatSku(nextRun++, categoryCode, subCategoryCode);
       } catch {
         return undefined;
       }
@@ -222,7 +222,7 @@ export class ImportService {
       const clean = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
 
       if (!dto.commit) {
-        if (res.action === 'create' && category && parent) res.sku = await predictSku();
+        if (res.action === 'create' && category?.code && parent?.code) res.sku = await predictSku(parent.code, category.code);
         if (res.action === 'create') created++;
         else updated++;
         results.push(res);

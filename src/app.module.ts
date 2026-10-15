@@ -31,6 +31,7 @@ import { SalesModule } from './sales/sales.module.js';
 import { SettingsModule } from './settings/settings.module.js';
 import { UsersModule } from './users/users.module.js';
 import { RolesModule } from './roles/roles.module.js';
+import { AgentsModule } from './agents/agents.module.js';
 import { VendorsModule } from './vendors/vendors.module.js';
 import { SmsModule } from './sms/sms.module.js';
 
@@ -62,6 +63,7 @@ import { SmsModule } from './sms/sms.module.js';
     SerialsModule,
     VanModule,
     ImportModule,
+    AgentsModule,
     VendorsModule,
     CustomersModule,
     PurchasesModule,

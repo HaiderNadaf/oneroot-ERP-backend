@@ -5,20 +5,25 @@ import type { ProductType } from '../generated/prisma/enums.js';
 /** Every product SKU starts with this */
 export const SKU_PREFIX = 'ORI';
 
-/** Digits after ORI: one running number shared by all products, zero-padded (ORI + 11 = 14 characters) */
+/** Digits after ORI: category code + sub-category code + running number, zero-padded to 11 (ORI + 11 = 14 characters) */
 const SKU_DIGITS = 11;
 
-/** Category / sub-category code: 1 to 999, no leading zero (used to find categories, not in the SKU) */
+/** Category / sub-category code: 1 to 999, no leading zero */
 export const CODE_PATTERN = /^[1-9]\d{0,2}$/;
 
 /** Running-number row behind every SKU */
 export const SKU_SEQ_KEY = `SKU-${SKU_PREFIX}`;
 
-/** ORI + running number padded to 11 digits, e.g. #1 → ORI00000000001 */
-export function formatSku(n: number) {
+/**
+ * ORI + category code + sub-category code + running number, the running number padded so the digits come to 11.
+ * e.g. Farm Machinery (1) → sub-category 2 → product #1 = ORI1 2 000000001 = ORI12000000001.
+ * The running number is shared by all products, so the SKU stays unique even when two code pairs read alike (1+12 / 11+2).
+ */
+export function formatSku(n: number, categoryCode: string, subCategoryCode: string) {
+  const prefix = `${categoryCode}${subCategoryCode}`;
   const run = String(n);
-  if (run.length > SKU_DIGITS) throw new BadRequestException(`SKU numbers are used up (${run})`);
-  return `${SKU_PREFIX}${run.padStart(SKU_DIGITS, '0')}`;
+  if (prefix.length + run.length > SKU_DIGITS) throw new BadRequestException(`SKU numbers are used up (${prefix}${run})`);
+  return `${SKU_PREFIX}${prefix}${run.padStart(SKU_DIGITS - prefix.length, '0')}`;
 }
 
 /** Next free numeric code among existing ones (1, 2 … skipping any taken) */
@@ -27,33 +32,40 @@ export function nextFreeCode(taken: (string | null)[]) {
   for (let n = 1; ; n++) if (!used.has(String(n))) return String(n);
 }
 
-/** Tax type and category a sub-category files the product under */
+/** Tax type, category and the two codes (the SKU prefix) of the sub-category a product is filed under */
 async function placeOf(db: Prisma.TransactionClient, subCategoryId: string | undefined) {
   if (!subCategoryId) throw new BadRequestException('Choose a sub-category');
   const sub = await db.subCategory.findUnique({ where: { id: subCategoryId }, include: { category: true } });
   if (!sub) throw new BadRequestException('Sub-category not found');
-  return { type: sub.category.type as ProductType | null, categoryId: sub.categoryId };
+  if (!sub.category.code) throw new BadRequestException(`Give ${sub.category.name} a code under Products → Categories first`);
+  if (!sub.code) throw new BadRequestException(`Give ${sub.name} a code under Products → Categories first`);
+  return {
+    type: sub.category.type as ProductType | null,
+    categoryId: sub.categoryId,
+    format: (n: number) => formatSku(n, sub.category.code!, sub.code!),
+  };
 }
 
-/** SKU the next product would get, without using it up (form preview) */
-export async function peekSku(db: Prisma.TransactionClient) {
+/** SKU the next product in this sub-category would get, without using it up (form preview) */
+export async function peekSku(db: Prisma.TransactionClient, subCategoryId: string) {
+  const { format } = await placeOf(db, subCategoryId);
   const seq = await db.sequence.findUnique({ where: { key: SKU_SEQ_KEY } });
   for (let n = (seq?.value ?? 0) + 1; ; n++) {
-    const sku = formatSku(n);
+    const sku = format(n);
     if (!(await db.product.findUnique({ where: { sku } }))) return sku;
   }
 }
 
 /** Allocates the next unique SKU, skipping any number already in the table; also returns the sub-category's tax type and category id */
 export async function nextSku(db: Prisma.TransactionClient, subCategoryId: string | undefined) {
-  const { type, categoryId } = await placeOf(db, subCategoryId);
+  const { type, categoryId, format } = await placeOf(db, subCategoryId);
   for (;;) {
     const seq = await db.sequence.upsert({
       where: { key: SKU_SEQ_KEY },
       create: { key: SKU_SEQ_KEY, value: 1 },
       update: { value: { increment: 1 } },
     });
-    const sku = formatSku(seq.value);
+    const sku = format(seq.value);
     if (!(await db.product.findUnique({ where: { sku } }))) return { sku, type, categoryId };
   }
 }

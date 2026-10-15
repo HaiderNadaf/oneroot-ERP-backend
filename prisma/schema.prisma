@@ -186,6 +186,7 @@ model User {
   approvalSteps    ApprovalStep[]
   notifications    Notification[]
   createdPos       PurchaseOrder[]   @relation("PoCreatedBy")
+  agentsDeleted    Agent[]           @relation("AgentDeletedBy")
   grns             Grn[]
   shiftsOpened     Shift[]           @relation("ShiftOpenedBy")
   approvalsAsked   ApprovalRequest[] @relation("ApprovalRequestedBy")
@@ -244,6 +245,7 @@ model Branch {
   updatedAt DateTime @updatedAt
 
   users          User[]
+  agents         Agent[]
   batches        Batch[]
   stockMovements StockMovement[]
   sales          Sale[]
@@ -336,6 +338,29 @@ model StoreSettings {
 }
 
 /// Running counters for document numbers (INV-000123 etc.)
+/// Agents who bring in vendors and customers. Soft-deleted: deletedAt / deletedBy are set instead of removing the row
+model Agent {
+  id          String    @id @default(cuid())
+  /// ORAGENT + 5-digit running number, e.g. ORAGENT00001 (never reused)
+  agentId     String    @unique
+  firstName   String
+  lastName    String?
+  /// 10-digit mobile number
+  mobile      String?
+  /// Branch the agent works with
+  branchId    String?
+  branch      Branch?   @relation(fields: [branchId], references: [id])
+  createdAt   DateTime  @default(now())
+  deletedAt   DateTime?
+  /// The logged-in user who deleted the agent
+  deletedById String?
+  deletedBy   User?     @relation("AgentDeletedBy", fields: [deletedById], references: [id])
+  sales       Sale[]
+
+  @@index([deletedAt])
+  @@index([branchId])
+}
+
 model Sequence {
   key   String @id
   value Int    @default(0)
@@ -936,6 +961,9 @@ model Sale {
   customerTypeName String?
   /// Manager approval used for a discount above the cashier's limit
   approvalId       String?
+  /// Agent who brought this sale in: internal reference only, never printed on the bill
+  agentId          String?
+  agent            Agent?        @relation(fields: [agentId], references: [id])
   notes            String?
   userId           String?
   user             User?         @relation(fields: [userId], references: [id])
@@ -951,6 +979,7 @@ model Sale {
 
   @@index([saleDate])
   @@index([customerId])
+  @@index([agentId])
   @@index([status, saleDate])
   @@index([paymentStatus])
   @@index([branchId, saleDate])

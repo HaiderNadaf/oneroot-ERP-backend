@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Body,
+  ConflictException,
   Controller,
   Delete,
   Get,
@@ -84,6 +85,33 @@ class CreateProductDto {
 }
 
 class UpdateProductDto extends PartialType(CreateProductDto) {}
+
+/**
+ * A product is its name + pack size + unit: the same name may come in other pack sizes or units, but not twice in the
+ * same one. Compared ignoring case and extra spaces; `exceptId` skips the product being edited.
+ */
+async function assertNotDuplicate(
+  db: Pick<Prisma.TransactionClient, 'product'>,
+  p: { name?: string | null; packSize?: string | null; unit?: string | null },
+  exceptId?: string,
+) {
+  const norm = (v?: string | null) => (v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  const name = norm(p.name);
+  if (!name) return;
+  const candidates = await db.product.findMany({
+    where: { name: { contains: name.split(' ')[0], mode: 'insensitive' }, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { name: true, packSize: true, unit: true, sku: true, isActive: true },
+  });
+  const clash = candidates.find(
+    (c) => norm(c.name) === name && norm(c.packSize) === norm(p.packSize) && norm(c.unit) === norm(p.unit ?? 'NOS'),
+  );
+  if (clash) {
+    const size = [clash.packSize?.trim(), clash.unit].filter(Boolean).join(' ');
+    throw new ConflictException(
+      `${clash.name} (${size}) already exists as ${clash.sku}${clash.isActive ? '' : ' (inactive)'} — change the pack size or unit, or edit that product`,
+    );
+  }
+}
 
 @Injectable()
 export class ProductsService {
@@ -240,7 +268,7 @@ export class ProductsService {
   /** SKU the next product in this sub-category would get — for the form preview */
   async previewSku(subCategoryId: string | undefined) {
     if (!subCategoryId) return { sku: null };
-    return this.prisma.$transaction(async (tx) => ({ sku: await peekSku(tx) }));
+    return this.prisma.$transaction(async (tx) => ({ sku: await peekSku(tx, subCategoryId) }));
   }
 
 
@@ -248,7 +276,9 @@ export class ProductsService {
     const { openingStock, sku: _typed, ...data } = dto;
     // The whole save is retried with the next number if a product saved at the same moment took this SKU
     return withUniqueSku(() => this.prisma.$transaction(async (tx) => {
-      // ORI + one running number for all products; the tax type comes from the category
+      // Same name + pack size + unit is the same product: refuse it
+      await assertNotDuplicate(tx, data);
+      // ORI + category code + sub-category code + running number; the tax type comes from the category
       const { sku, type, categoryId } = await nextSku(tx, data.subCategoryId);
       if (data.categoryId && data.categoryId !== categoryId) throw new BadRequestException('That sub-category belongs to another category');
       data.categoryId = categoryId;
@@ -318,6 +348,10 @@ export class ProductsService {
       throw new BadRequestException('A product must stay in a sub-category');
     } else if (data.categoryId) {
       throw new BadRequestException('Choose a sub-category of that category too');
+    }
+    if (data.name !== undefined || data.packSize !== undefined || data.unit !== undefined) {
+      const current = await this.prisma.product.findUniqueOrThrow({ where: { id }, select: { name: true, packSize: true, unit: true } });
+      await assertNotDuplicate(this.prisma, { ...current, ...data }, id);
     }
     const product = await this.prisma.product.update({
       where: { id },

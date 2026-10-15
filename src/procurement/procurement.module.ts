@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   Get,
   Injectable,
+  Logger,
   Module,
   Param,
   Post,
@@ -21,11 +22,13 @@ import {
   IsEnum,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsNumber,
   IsOptional,
   IsPositive,
   IsString,
   Max,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
@@ -60,6 +63,7 @@ import { SerialsService } from '../products/serials.module.js';
 import { calcPurchaseItem } from '../purchases/purchases.module.js';
 import { SmsService } from '../sms/sms.service.js';
 import { ApprovalsService, type ChainStep } from './approvals.service.js';
+import { PoExpiryService } from './po-expiry.service.js';
 
 type Tx = Prisma.TransactionClient;
 
@@ -70,9 +74,12 @@ class PoItemDto {
   @Type(() => Number) @IsNumber() @IsPositive() quantity: number;
   /** Rate per unit, excl. GST */
   @Type(() => Number) @IsNumber() @IsPositive() rate: number;
+  /** Trade discount on the line, % of quantity x rate (before GST) */
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) @Max(100) discountPct?: number;
 }
 
 /** Validity choices offered on the PO form */
+const GST_RATES = [0, 5, 12, 18, 28];
 const PO_EXPIRY_DAYS = [7, 14];
 
 class SavePoDto {
@@ -91,8 +98,12 @@ class SavePoDto {
   @IsOptional() @IsString() notes?: string;
   /** Freight on this order, added to the PO total */
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) transportCharges?: number;
+  /** GST % on the transportation charges, 18 when not given */
+  @IsOptional() @Type(() => Number) @IsIn(GST_RATES, { message: `GST must be one of ${GST_RATES.join(', ')}` }) transportGstRate?: number;
   /** Other charges (loading, packing …), added to the PO total */
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) otherCharges?: number;
+  /** GST % on the other charges, 18 when not given */
+  @IsOptional() @Type(() => Number) @IsIn(GST_RATES, { message: `GST must be one of ${GST_RATES.join(', ')}` }) otherChargesGstRate?: number;
   @IsOptional() @IsString() otherChargesNote?: string;
   /** true = submit for approval, false = save as draft */
   @IsBoolean() submit: boolean;
@@ -126,6 +137,8 @@ class GrnItemDto {
 
 class CreateGrnDto {
   @IsOptional() @IsString() vehicleNo?: string;
+  /** Number on the supplier's invoice that came with the goods; the purchase invoice is booked under it */
+  @IsString() @IsNotEmpty({ message: "Enter the supplier's invoice number" }) @MaxLength(50) supplierInvoiceNo: string;
   @IsOptional() @IsDateString() receivedAt?: string;
   @IsOptional() @IsString() notes?: string;
   @IsArray()
@@ -190,6 +203,8 @@ class CreateDebitNoteDto {
   @IsString() vendorId: string;
   @IsOptional() @IsString() purchaseId?: string;
   @IsOptional() @IsString() poId?: string;
+  /** Goods inward (GRN) the note is against; required, but taken from the invoice when one is given */
+  @IsOptional() @IsString() grnId?: string;
   @IsOptional() @IsString() vendorRef?: string;
   @IsOptional() @IsDateString() noteDate?: string;
   @IsString() reason: string;
@@ -266,11 +281,14 @@ function poLines(
     const p = products.get(i.productId);
     if (!p) throw new BadRequestException(`Unknown product ${i.productId}`);
     const gstRate = num(p.gstRate);
-    const taxable = round2(i.quantity * i.rate);
+    const discountPct = i.discountPct ?? 0;
+    // Discount comes off quantity x rate; GST is charged on what is left
+    const taxable = round2(i.quantity * i.rate * (1 - discountPct / 100));
     return {
       productId: i.productId,
       quantity: i.quantity,
       rate: i.rate,
+      discountPct,
       gstRate,
       taxable,
       amount: round2(taxable * (1 + gstRate / 100)),
@@ -278,15 +296,25 @@ function poLines(
   });
 }
 
+/** GST on transportation / other charges when the PO doesn't pick a rate */
+export const CHARGES_GST_RATE = 18;
+
+/** GST on a transport / other charge: taxed at its own rate (18% by default), not at the rates of the goods */
+export function chargesGst(charges: number, gstRate: number = CHARGES_GST_RATE) {
+  return charges > 0 ? round2((charges * gstRate) / 100) : 0;
+}
+
 const signature = (
-  items: { productId: string; quantity: unknown; rate: unknown }[],
+  items: { productId: string; quantity: unknown; rate: unknown; discountPct?: unknown }[],
 ) =>
-  JSON.stringify(items.map((i) => [i.productId, num(i.quantity), num(i.rate)]));
+  JSON.stringify(items.map((i) => [i.productId, num(i.quantity), num(i.rate), num(i.discountPct ?? 0)]));
 
 // ───────────────────────── Service ─────────────────────────
 
 @Injectable()
 export class ProcurementService {
+  private readonly logger = new Logger(ProcurementService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly approvals: ApprovalsService,
@@ -365,6 +393,7 @@ export class ProcurementService {
     const where: Prisma.PurchaseOrderWhereInput = {
       branchId: branchId ?? undefined,
       vendorId: q.vendorId || undefined,
+      deletedAt: null,
     };
     const listWhere = {
       ...where,
@@ -420,7 +449,7 @@ export class ProcurementService {
 
   async getPo(id: string, user: AuthUser) {
     const po = await this.prisma.purchaseOrder.findUniqueOrThrow({
-      where: { id },
+      where: { id, deletedAt: null },
       include: {
         vendor: true,
         branch: { select: { id: true, code: true, name: true, address: true, city: true } },
@@ -494,11 +523,16 @@ export class ProcurementService {
       const lines = poLines(dto.items, new Map(products.map((p) => [p.id, p])));
       const subtotal = round2(lines.reduce((s, l) => s + l.taxable, 0));
       const itemsTotal = round2(lines.reduce((s, l) => s + l.amount, 0));
-      const taxAmount = round2(itemsTotal - subtotal);
       const transportCharges = round2(dto.transportCharges ?? 0);
       const otherCharges = round2(dto.otherCharges ?? 0);
+      const transportGstRate = dto.transportGstRate ?? CHARGES_GST_RATE;
+      const otherChargesGstRate = dto.otherChargesGstRate ?? CHARGES_GST_RATE;
+      // Each item is taxed at its own rate (in its amount); each charge at its own rate. Subtotal stays the items' taxable value
+      const taxAmount = round2(
+        itemsTotal - subtotal + chargesGst(transportCharges, transportGstRate) + chargesGst(otherCharges, otherChargesGstRate),
+      );
       // Charges count towards the value that picks the approval band
-      const raw = round2(itemsTotal + transportCharges + otherCharges);
+      const raw = round2(subtotal + transportCharges + otherCharges + taxAmount);
       // Whole rupees: up to .49 goes down, .50 and above goes up
       const totalAmount = Math.round(raw);
       const roundOff = round2(totalAmount - raw);
@@ -510,7 +544,9 @@ export class ProcurementService {
         expectedDate: dto.expectedDate ? parseDay(dto.expectedDate) : null,
         expiryDays: dto.expiryDays,
         transportCharges,
+        transportGstRate,
         otherCharges,
+        otherChargesGstRate,
         otherChargesNote: otherCharges ? dto.otherChargesNote?.trim() || null : null,
         roundOff,
         notes: dto.notes || null,
@@ -522,6 +558,10 @@ export class ProcurementService {
 
       let po;
       if (!id) {
+        // Expected delivery is required when the PO is created, and fixed from then on (see the edit branch)
+        if (!header.expectedDate) throw new BadRequestException('Choose the expected delivery date');
+        if (header.expectedDate < startOfDay(header.orderDate))
+          throw new BadRequestException('Expected delivery cannot be before the order date');
         const settings = await tx.storeSettings.findUnique({
           where: { id: 1 },
         });
@@ -549,7 +589,7 @@ export class ProcurementService {
         );
       } else {
         const orig = await tx.purchaseOrder.findUniqueOrThrow({
-          where: { id },
+          where: { id, deletedAt: null },
           include: { items: true },
         });
         if (!EDITABLE.includes(orig.status) || receivedPct(orig.items) > 0) {
@@ -592,6 +632,8 @@ export class ProcurementService {
           where: { id },
           data: {
             ...header,
+            // Fixed at creation: edits keep the original date (older POs without one may set it once)
+            expectedDate: orig.expectedDate ?? header.expectedDate,
             round,
             level,
             status,
@@ -641,7 +683,7 @@ export class ProcurementService {
 
   async decide(id: string, dto: DecideDto, user: AuthUser) {
     return this.prisma.$transaction(async (tx) => {
-      const po = await tx.purchaseOrder.findUniqueOrThrow({ where: { id } });
+      const po = await tx.purchaseOrder.findUniqueOrThrow({ where: { id, deletedAt: null } });
       if (po.status !== 'PENDING_APPROVAL')
         throw new BadRequestException('This PO is not waiting for approval');
       const chain = await this.chainOf(po, tx);
@@ -766,7 +808,7 @@ export class ProcurementService {
   async cancelPo(id: string, user: AuthUser) {
     return this.prisma.$transaction(async (tx) => {
       const po = await tx.purchaseOrder.findUniqueOrThrow({
-        where: { id },
+        where: { id, deletedAt: null },
         include: { items: true },
       });
       if (
@@ -793,7 +835,7 @@ export class ProcurementService {
    */
   async bulkApprove(dto: BulkApproveDto, user: AuthUser) {
     const ids = [...new Set(dto.ids)];
-    const pos = await this.prisma.purchaseOrder.findMany({ where: { id: { in: ids } }, select: { id: true, poNo: true } });
+    const pos = await this.prisma.purchaseOrder.findMany({ where: { id: { in: ids }, deletedAt: null }, select: { id: true, poNo: true } });
     const poNo = new Map(pos.map((p) => [p.id, p.poNo]));
     const results: { id: string; poNo: string | null; ok: boolean; error?: string }[] = [];
     for (const id of ids) {
@@ -812,7 +854,7 @@ export class ProcurementService {
   async approvalQueue(user: AuthUser) {
     const [pending, decisions, config] = await Promise.all([
       this.prisma.purchaseOrder.findMany({
-        where: { status: 'PENDING_APPROVAL' },
+        where: { status: 'PENDING_APPROVAL', deletedAt: null },
         include: {
           vendor: { select: { id: true, name: true } },
           createdBy: { select: { name: true } },
@@ -864,7 +906,7 @@ export class ProcurementService {
 
   async myApprovalCount(user: AuthUser) {
     const pending = await this.prisma.purchaseOrder.findMany({
-      where: { status: 'PENDING_APPROVAL' },
+      where: { status: 'PENDING_APPROVAL', deletedAt: null },
       select: {
         level: true,
         levelsNeeded: true,
@@ -883,7 +925,7 @@ export class ProcurementService {
 
   async pendingInward(branchId: string | null = null) {
     const pos = await this.prisma.purchaseOrder.findMany({
-      where: { status: { in: RECEIVABLE }, branchId: branchId ?? undefined },
+      where: { status: { in: RECEIVABLE }, branchId: branchId ?? undefined, deletedAt: null },
       include: {
         vendor: { select: { id: true, name: true } },
         branch: { select: { id: true, code: true, name: true } },
@@ -900,11 +942,12 @@ export class ProcurementService {
     }));
   }
 
-  async listGrns(q: Paging & { vendorId?: string; invoiced?: string }, branchId: string | null = null) {
+  async listGrns(q: Paging & { vendorId?: string; poId?: string; invoiced?: string }, branchId: string | null = null) {
     const p = paging(q);
     const where: Prisma.GrnWhereInput = {
       branchId: branchId ?? undefined,
       vendorId: q.vendorId || undefined,
+      poId: q.poId || undefined,
       purchase:
         q.invoiced === 'false'
           ? { is: null }
@@ -942,6 +985,8 @@ export class ProcurementService {
       rejected: round3(items.reduce((s, i) => s + num(i.rejectedQty), 0)),
       damaged: round3(items.reduce((s, i) => s + num(i.damagedQty), 0)),
       expired: round3(items.reduce((s, i) => s + num(i.expiredQty), 0)),
+      // Everything that arrived, whatever the inspection outcome
+      received: round3(items.reduce((s, i) => s + num(i.passedQty) + num(i.rejectedQty) + num(i.damagedQty) + num(i.expiredQty), 0)),
     }));
     return paged(rows, total, p);
   }
@@ -958,7 +1003,7 @@ export class ProcurementService {
             product: {
               select: { name: true, sku: true, unit: true, hsnCode: true, barcode: true, mrp: true, salePrice: true, packSize: true },
             },
-            poItem: { select: { rate: true, gstRate: true, quantity: true } },
+            poItem: { select: { rate: true, gstRate: true, quantity: true, discountPct: true } },
           },
         },
         purchase: { select: { id: true, purchaseNo: true, status: true } },
@@ -970,7 +1015,7 @@ export class ProcurementService {
   async createGrn(poId: string, dto: CreateGrnDto, user: AuthUser, currentBranch: string | null = null) {
     const { grn, sms } = await this.prisma.$transaction(async (tx) => {
       const po = await tx.purchaseOrder.findUniqueOrThrow({
-        where: { id: poId },
+        where: { id: poId, deletedAt: null },
         include: {
           items: { include: { product: true } },
           branch: true,
@@ -1002,6 +1047,7 @@ export class ProcurementService {
           receivedAt,
           receivedById: user.id,
           vehicleNo: dto.vehicleNo || null,
+          supplierInvoiceNo: dto.supplierInvoiceNo.trim(),
           notes: dto.notes || null,
         },
       });
@@ -1164,7 +1210,7 @@ export class ProcurementService {
         ['purchases.manage'],
         {
           type: 'SUCCESS',
-          title: `${grnNo} posted — book the purchase invoice`,
+          title: `${grnNo} posted`,
           message: `${po.poNo} · ${status === 'RECEIVED' ? 'fully received' : 'partly received'}`,
           module: 'Goods Inward',
           link: `/goods-inward/${grn.id}`,
@@ -1201,7 +1247,43 @@ export class ProcurementService {
     }, TX_OPTIONS);
     // Sent after commit; never throws, so an SMS failure can't undo the GRN
     this.sms.notify(sms.phone, sms.text, `GRN ${grn.grnNo} SMS`);
-    return grn;
+    // A posted GRN books its purchase invoice straight away; if that fails the GRN stands and can be invoiced by hand
+    let purchase: { id: string; purchaseNo: string } | null = null;
+    let invoiceError: string | null = null;
+    try {
+      purchase = await this.autoInvoice(grn.id, user);
+    } catch (e) {
+      invoiceError = e instanceof Error ? e.message : 'Could not book the purchase invoice';
+      this.logger.warn(`${grn.grnNo}: purchase invoice not booked automatically — ${invoiceError}`);
+    }
+    return { ...grn, purchase, invoiceError };
+  }
+
+  /**
+   * Books the purchase invoice for a GRN's passed goods at the PO's rates and discounts, under the supplier invoice
+   * no. noted at goods inward. The PO's freight / other charges go on its first invoice. Null when nothing passed.
+   */
+  private async autoInvoice(grnId: string, user: AuthUser) {
+    const grn = await this.prisma.grn.findUniqueOrThrow({
+      where: { id: grnId },
+      include: { items: { include: { poItem: true } }, po: { include: { purchases: { select: { id: true, status: true } } } } },
+    });
+    const passed = grn.items.filter((i) => num(i.passedQty) > 0);
+    if (!passed.length) return null;
+    if (!grn.supplierInvoiceNo) throw new BadRequestException("No supplier invoice number on this GRN");
+    const firstInvoice = !grn.po.purchases.some((p) => p.status !== 'CANCELLED');
+    const purchase = await this.bookInvoice(
+      grn.id,
+      {
+        vendorInvoiceNo: grn.supplierInvoiceNo,
+        invoiceDate: grn.receivedAt.toISOString(),
+        items: passed.map((i) => ({ grnItemId: i.id, rate: num(i.rate), discountPct: num(i.poItem.discountPct) })),
+        otherCharges: firstInvoice ? round2(num(grn.po.transportCharges) + num(grn.po.otherCharges)) : 0,
+        notes: `Booked automatically from ${grn.grnNo}`,
+      },
+      user,
+    );
+    return { id: purchase.id, purchaseNo: purchase.purchaseNo };
   }
 
   /** Book the vendor's bill for what passed inspection; compares rates with the PO (three-way match) */
@@ -1455,8 +1537,9 @@ export class ProcurementService {
           'Rejected-at-inward notes are created by Goods Inward',
         );
 
-      // The invoice / PO the note is against must belong to the vendor
+      // The invoice / PO / GRN the note is against must belong to the vendor
       let poId = dto.poId ?? null;
+      let grnId = dto.grnId ?? null;
       if (dto.purchaseId) {
         const purchase = await tx.purchase.findUniqueOrThrow({
           where: { id: dto.purchaseId },
@@ -1468,16 +1551,30 @@ export class ProcurementService {
         if (purchase.status !== 'COMPLETED')
           throw new BadRequestException('That invoice is cancelled');
         poId = purchase.poId ?? poId;
+        grnId = purchase.grnId ?? grnId;
       }
-      if (poId) {
-        const po = await tx.purchaseOrder.findUniqueOrThrow({
-          where: { id: poId },
-        });
-        if (po.vendorId !== dto.vendorId)
-          throw new BadRequestException(
-            'That purchase order belongs to another vendor',
-          );
-      }
+      // Every debit / credit note must be against a purchase order and one of its goods inwards (GRN)
+      if (!grnId)
+        throw new BadRequestException(
+          'Choose the goods inward (GRN) this note is against',
+        );
+      const grn = await tx.grn.findUniqueOrThrow({ where: { id: grnId } });
+      poId = poId ?? grn.poId;
+      if (!poId)
+        throw new BadRequestException(
+          'Choose the purchase order this note is against',
+        );
+      if (grn.poId !== poId)
+        throw new BadRequestException(
+          'That goods inward belongs to another purchase order',
+        );
+      const po = await tx.purchaseOrder.findUniqueOrThrow({
+        where: { id: poId, deletedAt: null },
+      });
+      if (po.vendorId !== dto.vendorId)
+        throw new BadRequestException(
+          'That purchase order belongs to another vendor',
+        );
 
       const lines = [];
       for (const i of dto.items) {
@@ -1540,6 +1637,7 @@ export class ProcurementService {
           vendorId: dto.vendorId,
           purchaseId: dto.purchaseId ?? null,
           poId,
+          grnId,
           vendorRef: dto.vendorRef?.trim() || null,
           noteDate: docDate(dto.noteDate),
           reason: dto.reason,
@@ -1802,6 +1900,6 @@ export class ApprovalRulesController {
     DebitNotesController,
     ApprovalRulesController,
   ],
-  providers: [ProcurementService, ApprovalsService],
+  providers: [ProcurementService, ApprovalsService, PoExpiryService],
 })
 export class ProcurementModule {}

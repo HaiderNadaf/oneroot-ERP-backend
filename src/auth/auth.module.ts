@@ -27,6 +27,11 @@ class ChangePasswordDto {
   @IsString() @MinLength(6) newPassword: string;
 }
 
+/** Change password from the sign-in screen: no session, so the email says whose */
+class ForgotPasswordDto extends ChangePasswordDto {
+  @IsEmail() email: string;
+}
+
 const DEFAULT_EXPENSE_CATEGORIES = ['Rent', 'Salary', 'Electricity', 'Transport', 'Loading/Unloading', 'Maintenance', 'Miscellaneous'];
 
 @Injectable()
@@ -77,6 +82,22 @@ export class AuthService implements OnApplicationBootstrap {
     });
     return { ok: true };
   }
+
+  /** Signed-out password change in one call: checks email + current password, then sets the new one (no token issued) */
+  async forgotPassword(dto: ForgotPasswordDto) {
+    const user = await this.prisma.user.findUnique({ where: { email: dto.email.toLowerCase() } });
+    // One message for every miss, so the form can't be used to find out which emails exist
+    if (!user || !user.isActive || !(await bcrypt.compare(dto.currentPassword, user.passwordHash))) {
+      throw new BadRequestException('Email or current password is incorrect');
+    }
+    if (dto.newPassword === dto.currentPassword) throw new BadRequestException('New password must be different from the current one');
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: await bcrypt.hash(dto.newPassword, 10) },
+    });
+    await this.audit.log(user.id, 'PASSWORD_CHANGE', 'User', user.id, { from: 'sign-in screen' });
+    return { ok: true };
+  }
 }
 
 @Controller('auth')
@@ -97,6 +118,12 @@ export class AuthController {
   @Post('change-password')
   changePassword(@CurrentUser() user: AuthUser, @Body() dto: ChangePasswordDto) {
     return this.auth.changePassword(user.id, dto);
+  }
+
+  @Public()
+  @Post('forgot-password')
+  forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.auth.forgotPassword(dto);
   }
 }
 

@@ -2,6 +2,7 @@ import { Controller, Get, Injectable, Module, OnApplicationBootstrap, Query } fr
 import { CashService } from '../cash/cash.module.js';
 import { dashboardCache } from '../common/cache.js';
 import { BranchId, CurrentUser, type AuthUser } from '../common/decorators.js';
+import { hasPerm, type Permission } from '../common/permissions.js';
 import { endOfDay, num, round2, startOfDay } from '../common/utils.js';
 import { GovtModule, GovtService } from '../compliance/govt.module.js';
 import { Prisma } from '../generated/prisma/client.js';
@@ -218,11 +219,11 @@ export class DashboardService implements OnApplicationBootstrap {
         : this.prisma.$queryRaw<{ n: bigint }[]>`
             SELECT COUNT(*) AS n FROM "Product" WHERE "isActive" = true AND "reorderLevel" > 0 AND stock <= "reorderLevel"`,
       this.prisma.purchaseOrder.findMany({
-        where: { status: 'PENDING_APPROVAL', branchId: B },
+        where: { status: 'PENDING_APPROVAL', branchId: B, deletedAt: null },
         include: { vendor: { select: { name: true } } },
         orderBy: { orderDate: 'asc' },
       }),
-      this.prisma.purchaseOrder.count({ where: { status: { in: ['APPROVED', 'PARTIALLY_RECEIVED'] }, branchId: B } }),
+      this.prisma.purchaseOrder.count({ where: { status: { in: ['APPROVED', 'PARTIALLY_RECEIVED'] }, branchId: B, deletedAt: null } }),
       this.prisma.grn.count({ where: { purchase: { is: null }, branchId: B } }),
       this.prisma.debitNote.count({ where: { status: 'DRAFT', branchId: B } }),
       this.prisma.sale.findMany({
@@ -267,7 +268,7 @@ export class DashboardService implements OnApplicationBootstrap {
         this.prisma.vendor.count({ where: { isActive: true } }),
         this.prisma.product.count({ where: { isActive: true } }),
         this.prisma.batch.count({ where: { quantity: { gt: 0 }, branchId: B } }),
-        this.prisma.purchaseOrder.count({ where: { status: { in: ['DRAFT', 'PENDING_APPROVAL', 'SENT_BACK', 'APPROVED', 'PARTIALLY_RECEIVED'] }, branchId: B } }),
+        this.prisma.purchaseOrder.count({ where: { status: { in: ['DRAFT', 'PENDING_APPROVAL', 'SENT_BACK', 'APPROVED', 'PARTIALLY_RECEIVED'] }, branchId: B, deletedAt: null } }),
         this.prisma.user.count({ where: { isActive: true, ...(branchId ? { OR: [{ branchId }, { branchId: null }] } : {}) } }),
       ]),
       this.cash.reconciliation(branchId),
@@ -392,50 +393,68 @@ export class DashboardService implements OnApplicationBootstrap {
   }
 
   /** Top-bar search across products, batches, parties and documents */
-  async search(q: string) {
+  /** Top-bar search: each kind of record only for users allowed to open it; returns the fields that can explain a match */
+  async search(q: string, user: AuthUser) {
     const term = q.trim();
-    if (term.length < 2) return { products: [], customers: [], vendors: [], sales: [], purchases: [], purchaseOrders: [], batches: [] };
+    const none = { products: [], customers: [], vendors: [], sales: [], purchases: [], purchaseOrders: [], batches: [] };
+    if (term.length < 2) return none;
     const ci = { contains: term, mode: 'insensitive' as const };
+    const may = (...keys: Permission[]) => hasPerm(user, ...keys);
+    const skip = Promise.resolve([] as never[]);
     const [products, customers, vendors, sales, purchases, purchaseOrders, batches] = await Promise.all([
-      this.prisma.product.findMany({
-        where: { OR: [{ name: ci }, { sku: ci }, { barcode: term }, { brand: ci }, { technicalName: ci }] },
-        select: { id: true, name: true, sku: true, unit: true, stock: true, isActive: true },
-        take: 6,
-        orderBy: { name: 'asc' },
-      }),
-      this.prisma.customer.findMany({
-        where: { OR: [{ name: ci }, { phone: { contains: term } }, { village: ci }] },
-        select: { id: true, name: true, phone: true, village: true, balance: true },
-        take: 5,
-      }),
-      this.prisma.vendor.findMany({
-        where: { OR: [{ name: ci }, { phone: { contains: term } }, { gstin: ci }] },
-        select: { id: true, name: true, phone: true, balance: true },
-        take: 5,
-      }),
-      this.prisma.sale.findMany({
-        where: { OR: [{ invoiceNo: ci }, { customerName: ci }, { customerPhone: { contains: term } }] },
-        select: { id: true, invoiceNo: true, customerName: true, totalAmount: true, saleDate: true, status: true },
-        orderBy: { saleDate: 'desc' },
-        take: 5,
-      }),
-      this.prisma.purchase.findMany({
-        where: { OR: [{ purchaseNo: ci }, { vendorInvoiceNo: ci }] },
-        select: { id: true, purchaseNo: true, vendorInvoiceNo: true, totalAmount: true, vendor: { select: { name: true } } },
-        orderBy: { purchaseDate: 'desc' },
-        take: 5,
-      }),
-      this.prisma.purchaseOrder.findMany({
-        where: { poNo: ci },
-        select: { id: true, poNo: true, status: true, totalAmount: true, vendor: { select: { name: true } } },
-        orderBy: { orderDate: 'desc' },
-        take: 5,
-      }),
-      this.prisma.batch.findMany({
-        where: { batchNo: ci, quantity: { gt: 0 } },
-        select: { id: true, batchNo: true, expiryDate: true, quantity: true, product: { select: { id: true, name: true, unit: true } } },
-        take: 5,
-      }),
+      may('products.view')
+        ? this.prisma.product.findMany({
+            where: { OR: [{ name: ci }, { sku: ci }, { barcode: term }, { brand: ci }, { technicalName: ci }, { hsnCode: { startsWith: term } }] },
+            select: { id: true, name: true, sku: true, unit: true, stock: true, isActive: true, barcode: true, brand: true, technicalName: true, hsnCode: true },
+            take: 6,
+            orderBy: { name: 'asc' },
+          })
+        : skip,
+      may('customers.view')
+        ? this.prisma.customer.findMany({
+            where: { OR: [{ name: ci }, { phone: { contains: term } }, { village: ci }] },
+            select: { id: true, name: true, phone: true, village: true, balance: true },
+            take: 5,
+          })
+        : skip,
+      may('vendors.view')
+        ? this.prisma.vendor.findMany({
+            where: { OR: [{ name: ci }, { phone: { contains: term } }, { gstin: ci }] },
+            select: { id: true, name: true, phone: true, gstin: true, balance: true },
+            take: 5,
+          })
+        : skip,
+      may('sales.bill')
+        ? this.prisma.sale.findMany({
+            where: { OR: [{ invoiceNo: ci }, { customerName: ci }, { customerPhone: { contains: term } }] },
+            select: { id: true, invoiceNo: true, customerName: true, customerPhone: true, totalAmount: true, saleDate: true, status: true },
+            orderBy: { saleDate: 'desc' },
+            take: 5,
+          })
+        : skip,
+      may('purchases.view')
+        ? this.prisma.purchase.findMany({
+            where: { OR: [{ purchaseNo: ci }, { vendorInvoiceNo: ci }, { vendor: { name: ci } }] },
+            select: { id: true, purchaseNo: true, vendorInvoiceNo: true, totalAmount: true, purchaseDate: true, vendor: { select: { name: true } } },
+            orderBy: { purchaseDate: 'desc' },
+            take: 5,
+          })
+        : skip,
+      may('purchases.view')
+        ? this.prisma.purchaseOrder.findMany({
+            where: { OR: [{ poNo: ci }, { vendor: { name: ci } }], deletedAt: null },
+            select: { id: true, poNo: true, status: true, totalAmount: true, orderDate: true, vendor: { select: { name: true } } },
+            orderBy: { orderDate: 'desc' },
+            take: 5,
+          })
+        : skip,
+      may('inventory.view', 'products.view')
+        ? this.prisma.batch.findMany({
+            where: { batchNo: ci, quantity: { gt: 0 } },
+            select: { id: true, batchNo: true, expiryDate: true, quantity: true, product: { select: { id: true, name: true, unit: true } } },
+            take: 5,
+          })
+        : skip,
     ]);
     return { products, customers, vendors, sales, purchases, purchaseOrders, batches };
   }
@@ -451,8 +470,8 @@ export class DashboardController {
   }
 
   @Get('search')
-  search(@Query('q') q = '') {
-    return this.dashboard.search(q);
+  search(@Query('q') q = '', @CurrentUser() user: AuthUser) {
+    return this.dashboard.search(q, user);
   }
 }
 

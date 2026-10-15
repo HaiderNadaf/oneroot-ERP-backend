@@ -134,6 +134,7 @@ export class PurchasesService {
       where: { id },
       include: {
         vendor: true,
+        branch: { select: { id: true, code: true, name: true, address: true, city: true } },
         po: { select: { id: true, poNo: true } },
         grn: { select: { id: true, grnNo: true } },
         items: { include: { product: { select: { name: true, sku: true, unit: true, hsnCode: true } } } },

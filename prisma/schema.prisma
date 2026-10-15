@@ -183,21 +183,21 @@ model User {
   expenses  Expense[]
   auditLogs AuditLog[]
 
-  approvalSteps ApprovalStep[]
-  notifications Notification[]
-  createdPos    PurchaseOrder[] @relation("PoCreatedBy")
-  grns          Grn[]
-  shiftsOpened  Shift[]         @relation("ShiftOpenedBy")
-  approvalsAsked    ApprovalRequest[] @relation("ApprovalRequestedBy")
-  approvalsDecided  ApprovalRequest[] @relation("ApprovalDecidedBy")
-  heldBills         HeldBill[]
-  vanTrips          VanTrip[]
+  approvalSteps    ApprovalStep[]
+  notifications    Notification[]
+  createdPos       PurchaseOrder[]   @relation("PoCreatedBy")
+  grns             Grn[]
+  shiftsOpened     Shift[]           @relation("ShiftOpenedBy")
+  approvalsAsked   ApprovalRequest[] @relation("ApprovalRequestedBy")
+  approvalsDecided ApprovalRequest[] @relation("ApprovalDecidedBy")
+  heldBills        HeldBill[]
+  vanTrips         VanTrip[]
   /// Home branch; staff only see this branch. Empty = can work in every branch
-  branchId      String?
-  branch        Branch?         @relation(fields: [branchId], references: [id])
+  branchId         String?
+  branch           Branch?           @relation(fields: [branchId], references: [id])
   /// Custom role this user was given (a named set of ticks); role above is its base role
-  roleTemplateId String?
-  roleTemplate   RoleTemplate?  @relation(fields: [roleTemplateId], references: [id])
+  roleTemplateId   String?
+  roleTemplate     RoleTemplate?     @relation(fields: [roleTemplateId], references: [id])
 }
 
 /// A custom role: a named set of permission ticks built on one of the built-in roles (which still supplies the authority limits)
@@ -253,8 +253,8 @@ model Branch {
   payments       Payment[]
   expenses       Expense[]
   debitNotes     DebitNote[]
-  transfersOut   StockTransfer[] @relation("TransferFrom")
-  transfersIn    StockTransfer[] @relation("TransferTo")
+  transfersOut   StockTransfer[]   @relation("TransferFrom")
+  transfersIn    StockTransfer[]   @relation("TransferTo")
   journalEntries JournalEntry[]
   shifts         Shift[]
   deposits       BankDeposit[]
@@ -391,13 +391,13 @@ model SubCategory {
 }
 
 model Product {
-  id            String      @id @default(cuid())
-  sku           String      @unique
-  barcode       String?     @unique
+  id            String       @id @default(cuid())
+  sku           String       @unique
+  barcode       String?      @unique
   name          String
-  type          ProductType @default(OTHER)
+  type          ProductType  @default(OTHER)
   categoryId    String?
-  category      Category?   @relation(fields: [categoryId], references: [id])
+  category      Category?    @relation(fields: [categoryId], references: [id])
   subCategoryId String?
   subCategory   SubCategory? @relation(fields: [subCategoryId], references: [id])
   brand         String?
@@ -405,27 +405,27 @@ model Product {
   technicalName String? // active ingredient / composition, e.g. "Imidacloprid 17.8% SL"
   description   String?
   hsnCode       String?
-  gstRate       Decimal     @default(0) @db.Decimal(5, 2)
-  unit          String      @default("NOS") // KG, LTR, BAG, PKT, NOS, ML, GM
+  gstRate       Decimal      @default(0) @db.Decimal(5, 2)
+  unit          String       @default("NOS") // KG, LTR, BAG, PKT, NOS, ML, GM
   packSize      String? // e.g. "50 kg bag", "250 ml"
-  mrp           Decimal     @default(0) @db.Decimal(12, 2)
-  salePrice     Decimal     @default(0) @db.Decimal(12, 2)
-  purchasePrice Decimal     @default(0) @db.Decimal(12, 2)
-  reorderLevel  Decimal     @default(0) @db.Decimal(12, 3)
-  trackBatch    Boolean     @default(true)
+  mrp           Decimal      @default(0) @db.Decimal(12, 2)
+  salePrice     Decimal      @default(0) @db.Decimal(12, 2)
+  purchasePrice Decimal      @default(0) @db.Decimal(12, 2)
+  reorderLevel  Decimal      @default(0) @db.Decimal(12, 3)
+  trackBatch    Boolean      @default(true)
   /// Govt-subsidised fertiliser: every bill line needs the govt POS receipt no. and stock is matched with the portal
-  isSubsidised  Boolean     @default(false)
+  isSubsidised  Boolean      @default(false)
   /// Each unit carries a serial number (sprayers, pumps): bills pick the serials that leave
-  trackSerial   Boolean     @default(false)
+  trackSerial   Boolean      @default(false)
   /// Where it normally sits in the store: rack / bin / shelf
   location      String?
   /// Values for the category's extra fields, keyed by field key
   attributes    Json?
-  isActive      Boolean     @default(true)
+  isActive      Boolean      @default(true)
   // Denormalised total stock, kept in sync with batches in the same transaction
-  stock         Decimal     @default(0) @db.Decimal(12, 3)
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  stock         Decimal      @default(0) @db.Decimal(12, 3)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 
   batches            Batch[]
   stockMovements     StockMovement[]
@@ -540,9 +540,9 @@ model Vendor {
 }
 
 model Customer {
-  id             String   @id @default(cuid())
+  id             String        @id @default(cuid())
   name           String
-  phone          String?  @unique
+  phone          String?       @unique
   email          String?
   gstin          String?
   village        String?
@@ -550,23 +550,23 @@ model Customer {
   city           String?
   state          String?
   pincode        String?
-  landAcres      Decimal? @db.Decimal(8, 2)
+  landAcres      Decimal?      @db.Decimal(8, 2)
   crops          String? // comma separated: "Paddy, Sugarcane"
   /// FPO, bulk buyer… decides an automatic discount at the counter
   customerTypeId String?
   customerType   CustomerType? @relation(fields: [customerTypeId], references: [id])
-  creditLimit    Decimal  @default(0) @db.Decimal(14, 2)
+  creditLimit    Decimal       @default(0) @db.Decimal(14, 2)
   /// Credit period: unpaid bills fall due this many days after the sale (0 = due immediately)
-  creditDays     Int      @default(0)
+  creditDays     Int           @default(0)
   /// Blocks further credit sales until cleared by a manager
-  creditHold     Boolean  @default(false)
-  openingBalance Decimal  @default(0) @db.Decimal(14, 2)
+  creditHold     Boolean       @default(false)
+  openingBalance Decimal       @default(0) @db.Decimal(14, 2)
   // Amount the customer owes us (positive = receivable)
-  balance        Decimal  @default(0) @db.Decimal(14, 2)
+  balance        Decimal       @default(0) @db.Decimal(14, 2)
   notes          String?
-  isActive       Boolean  @default(true)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  isActive       Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   sales       Sale[]
   saleReturns SaleReturn[]
@@ -597,39 +597,45 @@ model CustomerReminder {
 // ───────────────────────── Purchasing ─────────────────────────
 
 model PurchaseOrder {
-  id            String              @id @default(cuid())
-  poNo          String              @unique
-  vendorId      String
-  vendor        Vendor              @relation(fields: [vendorId], references: [id])
-  orderDate     DateTime            @default(now())
-  expectedDate  DateTime?
+  id               String              @id @default(cuid())
+  poNo             String              @unique
+  vendorId         String
+  vendor           Vendor              @relation(fields: [vendorId], references: [id])
+  orderDate        DateTime            @default(now())
+  expectedDate     DateTime?
   /// How many days the PO stays valid: 7 or 14 (null on POs created before this was added)
-  expiryDays    Int?
-  status        PurchaseOrderStatus @default(DRAFT)
-  subtotal      Decimal             @default(0) @db.Decimal(14, 2)
-  taxAmount     Decimal             @default(0) @db.Decimal(14, 2)
-  /// Freight / transportation charged on this order (no GST)
-  transportCharges Decimal          @default(0) @db.Decimal(14, 2)
+  expiryDays       Int?
+  status           PurchaseOrderStatus @default(DRAFT)
+  subtotal         Decimal             @default(0) @db.Decimal(14, 2)
+  taxAmount        Decimal             @default(0) @db.Decimal(14, 2)
+  /// Freight / transportation on this order, before GST (taxed at transportGstRate)
+  transportCharges Decimal             @default(0) @db.Decimal(14, 2)
+  /// GST % on the transportation charges (18 unless chosen otherwise)
+  transportGstRate Decimal             @default(18) @db.Decimal(5, 2)
   /// Any other charges (loading, packing …); otherChargesNote says what they are
-  otherCharges  Decimal             @default(0) @db.Decimal(14, 2)
+  otherCharges     Decimal             @default(0) @db.Decimal(14, 2)
+  /// GST % on the other charges (18 unless chosen otherwise)
+  otherChargesGstRate Decimal          @default(18) @db.Decimal(5, 2)
   otherChargesNote String?
   /// Added to reach a whole-rupee total: .01–.49 rounds down, .50–.99 rounds up
-  roundOff      Decimal             @default(0) @db.Decimal(6, 2)
-  /// Items incl. GST plus the charges above, rounded to the rupee - decides the approval band
-  totalAmount   Decimal             @default(0) @db.Decimal(14, 2)
+  roundOff         Decimal             @default(0) @db.Decimal(6, 2)
+  /// Items + charges (taxable value) plus GST on both, rounded to the rupee - decides the approval band
+  totalAmount      Decimal             @default(0) @db.Decimal(14, 2)
   /// Approval round: goes up when a sent-back or approved PO is edited and resubmitted
-  round         Int                 @default(1)
+  round            Int                 @default(1)
   /// Index of the approval step currently waiting (0-based)
-  level         Int                 @default(0)
+  level            Int                 @default(0)
   /// Number of approval steps this PO needs, fixed when it is submitted
-  levelsNeeded  Int                 @default(1)
+  levelsNeeded     Int                 @default(1)
   /// Snapshot of the approval chain taken at submission, so later rule changes don't re-route this PO
-  approvalChain Json?
-  notes         String?
-  createdById   String?
-  createdBy     User?               @relation("PoCreatedBy", fields: [createdById], references: [id])
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
+  approvalChain    Json?
+  notes            String?
+  createdById      String?
+  createdBy        User?               @relation("PoCreatedBy", fields: [createdById], references: [id])
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  /// Soft delete: set the day after an open PO expires (orderDate + expiryDays); hidden everywhere once set
+  deletedAt        DateTime?
 
   items      PurchaseOrderItem[]
   purchases  Purchase[]
@@ -642,6 +648,7 @@ model PurchaseOrder {
 
   @@index([status, orderDate])
   @@index([vendorId])
+  @@index([deletedAt])
 }
 
 /// Every PO event: created, submitted, approved, sent back, rejected, edited, GRN posted
@@ -684,8 +691,10 @@ model PurchaseOrderItem {
   quantity    Decimal       @db.Decimal(12, 3)
   /// Excl. GST
   rate        Decimal       @db.Decimal(12, 2)
+  /// Trade discount on the line, % of quantity x rate (taken off before GST)
+  discountPct Decimal       @default(0) @db.Decimal(5, 2)
   gstRate     Decimal       @default(0) @db.Decimal(5, 2)
-  /// Incl. GST
+  /// Incl. GST, after the discount
   amount      Decimal       @db.Decimal(14, 2)
   // Running totals from posted GRNs
   passedQty   Decimal       @default(0) @db.Decimal(12, 3)
@@ -698,18 +707,20 @@ model PurchaseOrderItem {
 
 /// Goods inward note: what physically arrived against a PO
 model Grn {
-  id           String        @id @default(cuid())
-  grnNo        String        @unique
-  poId         String
-  po           PurchaseOrder @relation(fields: [poId], references: [id])
-  vendorId     String
-  vendor       Vendor        @relation(fields: [vendorId], references: [id])
-  receivedAt   DateTime      @default(now())
-  receivedById String?
-  receivedBy   User?         @relation(fields: [receivedById], references: [id])
-  vehicleNo    String?
-  notes        String?
-  createdAt    DateTime      @default(now())
+  id                String        @id @default(cuid())
+  grnNo             String        @unique
+  poId              String
+  po                PurchaseOrder @relation(fields: [poId], references: [id])
+  vendorId          String
+  vendor            Vendor        @relation(fields: [vendorId], references: [id])
+  receivedAt        DateTime      @default(now())
+  receivedById      String?
+  receivedBy        User?         @relation(fields: [receivedById], references: [id])
+  vehicleNo         String?
+  /// Number on the supplier's invoice / challan that came with the goods
+  supplierInvoiceNo String?
+  notes             String?
+  createdAt         DateTime      @default(now())
 
   items      GrnItem[]
   purchase   Purchase?
@@ -890,46 +901,46 @@ model PurchaseItem {
 // ───────────────────────── Sales ─────────────────────────
 
 model Sale {
-  id            String        @id @default(cuid())
-  invoiceNo     String        @unique
-  customerId    String?
-  customer      Customer?     @relation(fields: [customerId], references: [id])
-  customerName  String? // for walk-in customers
-  customerPhone String?
-  saleDate      DateTime      @default(now())
-  dueDate       DateTime?
-  subtotal      Decimal       @db.Decimal(14, 2)
-  discount      Decimal       @default(0) @db.Decimal(14, 2)
-  taxAmount     Decimal       @db.Decimal(14, 2)
-  cgst          Decimal       @default(0) @db.Decimal(14, 2)
-  sgst          Decimal       @default(0) @db.Decimal(14, 2)
-  igst          Decimal       @default(0) @db.Decimal(14, 2)
-  roundOff      Decimal       @default(0) @db.Decimal(6, 2)
-  totalAmount   Decimal       @db.Decimal(14, 2)
-  paidAmount    Decimal       @default(0) @db.Decimal(14, 2)
-  costAmount    Decimal       @default(0) @db.Decimal(14, 2) // COGS for profit reports
-  paymentMode   PaymentMode   @default(CASH)
-  paymentStatus PaymentStatus @default(PAID)
-  status        DocStatus     @default(COMPLETED)
-  isInterState  Boolean       @default(false)
+  id               String        @id @default(cuid())
+  invoiceNo        String        @unique
+  customerId       String?
+  customer         Customer?     @relation(fields: [customerId], references: [id])
+  customerName     String? // for walk-in customers
+  customerPhone    String?
+  saleDate         DateTime      @default(now())
+  dueDate          DateTime?
+  subtotal         Decimal       @db.Decimal(14, 2)
+  discount         Decimal       @default(0) @db.Decimal(14, 2)
+  taxAmount        Decimal       @db.Decimal(14, 2)
+  cgst             Decimal       @default(0) @db.Decimal(14, 2)
+  sgst             Decimal       @default(0) @db.Decimal(14, 2)
+  igst             Decimal       @default(0) @db.Decimal(14, 2)
+  roundOff         Decimal       @default(0) @db.Decimal(6, 2)
+  totalAmount      Decimal       @db.Decimal(14, 2)
+  paidAmount       Decimal       @default(0) @db.Decimal(14, 2)
+  costAmount       Decimal       @default(0) @db.Decimal(14, 2) // COGS for profit reports
+  paymentMode      PaymentMode   @default(CASH)
+  paymentStatus    PaymentStatus @default(PAID)
+  status           DocStatus     @default(COMPLETED)
+  isInterState     Boolean       @default(false)
   /// Set by the POS when the bill was made offline, so a retried sync never bills twice
-  offlineId     String?       @unique
+  offlineId        String?       @unique
   /// Where the bill was made: the counter or a van trip in the villages
-  channel       SaleChannel   @default(COUNTER)
-  vanTripId     String?
-  vanTrip       VanTrip?      @relation(fields: [vanTripId], references: [id])
+  channel          SaleChannel   @default(COUNTER)
+  vanTripId        String?
+  vanTrip          VanTrip?      @relation(fields: [vanTripId], references: [id])
   /// Receipt no. from the government fertiliser POS device (required when a subsidised product is billed)
-  govtReceiptNo String?
-  aadhaarVerified Boolean     @default(false)
+  govtReceiptNo    String?
+  aadhaarVerified  Boolean       @default(false)
   /// Customer type whose discount applied, as named at the time
   customerTypeName String?
   /// Manager approval used for a discount above the cashier's limit
-  approvalId    String?
-  notes         String?
-  userId        String?
-  user          User?         @relation(fields: [userId], references: [id])
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  approvalId       String?
+  notes            String?
+  userId           String?
+  user             User?         @relation(fields: [userId], references: [id])
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
   items    SaleItem[]
   payments Payment[]
@@ -947,36 +958,36 @@ model Sale {
 }
 
 model SaleItem {
-  id            String    @id @default(cuid())
-  saleId        String
-  sale          Sale      @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  productId     String
-  product       Product   @relation(fields: [productId], references: [id])
-  batchId       String?
-  batch         Batch?    @relation(fields: [batchId], references: [id])
-  batchNo       String?
+  id                String         @id @default(cuid())
+  saleId            String
+  sale              Sale           @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId         String
+  product           Product        @relation(fields: [productId], references: [id])
+  batchId           String?
+  batch             Batch?         @relation(fields: [batchId], references: [id])
+  batchNo           String?
   /// Serial-numbered units that left with this line
-  serials       SerialNumber[]
-  expiryDate    DateTime?
-  productName   String
-  hsnCode       String?
-  unit          String
-  quantity      Decimal   @db.Decimal(12, 3)
-  rate          Decimal   @db.Decimal(12, 2) // tax-inclusive selling price per unit
-  discountPct   Decimal   @default(0) @db.Decimal(5, 2)
-  gstRate       Decimal   @default(0) @db.Decimal(5, 2)
-  taxableAmount Decimal   @db.Decimal(14, 2)
-  taxAmount     Decimal   @db.Decimal(14, 2)
-  amount        Decimal   @db.Decimal(14, 2)
-  costPrice     Decimal   @default(0) @db.Decimal(12, 2)
-  returnedQty   Decimal   @default(0) @db.Decimal(12, 3)
+  serials           SerialNumber[]
+  expiryDate        DateTime?
+  productName       String
+  hsnCode           String?
+  unit              String
+  quantity          Decimal        @db.Decimal(12, 3)
+  rate              Decimal        @db.Decimal(12, 2) // tax-inclusive selling price per unit
+  discountPct       Decimal        @default(0) @db.Decimal(5, 2)
+  gstRate           Decimal        @default(0) @db.Decimal(5, 2)
+  taxableAmount     Decimal        @db.Decimal(14, 2)
+  taxAmount         Decimal        @db.Decimal(14, 2)
+  amount            Decimal        @db.Decimal(14, 2)
+  costPrice         Decimal        @default(0) @db.Decimal(12, 2)
+  returnedQty       Decimal        @default(0) @db.Decimal(12, 3)
   /// Discount typed by the cashier (part of discountPct, which also holds scheme and customer-type discounts)
-  manualDiscountPct Decimal @default(0) @db.Decimal(5, 2)
-  typeDiscountPct   Decimal @default(0) @db.Decimal(5, 2)
-  schemeId      String?
-  scheme        Scheme?   @relation(fields: [schemeId], references: [id])
+  manualDiscountPct Decimal        @default(0) @db.Decimal(5, 2)
+  typeDiscountPct   Decimal        @default(0) @db.Decimal(5, 2)
+  schemeId          String?
+  scheme            Scheme?        @relation(fields: [schemeId], references: [id])
   /// Free goods line from a buy-X-get-Y scheme (rate 0, stock still goes out)
-  isFree        Boolean   @default(false)
+  isFree            Boolean        @default(false)
 
   returnItems SaleReturnItem[]
 
@@ -985,23 +996,23 @@ model SaleItem {
 }
 
 model SaleReturn {
-  id          String      @id @default(cuid())
-  returnNo    String      @unique
-  saleId      String
-  sale        Sale        @relation(fields: [saleId], references: [id])
-  customerId  String?
-  customer    Customer?   @relation(fields: [customerId], references: [id])
-  returnDate  DateTime    @default(now())
-  totalAmount Decimal     @db.Decimal(14, 2)
-  refundMode  PaymentMode @default(CASH) // CREDIT = adjust against customer balance
-  reason      String?
+  id              String      @id @default(cuid())
+  returnNo        String      @unique
+  saleId          String
+  sale            Sale        @relation(fields: [saleId], references: [id])
+  customerId      String?
+  customer        Customer?   @relation(fields: [customerId], references: [id])
+  returnDate      DateTime    @default(now())
+  totalAmount     Decimal     @db.Decimal(14, 2)
+  refundMode      PaymentMode @default(CASH) // CREDIT = adjust against customer balance
+  reason          String?
   /// Reversal reference on the government POS, required when subsidised fertiliser comes back
   govtReversalRef String?
-  approvalId  String?
-  shiftId     String?
-  shift       Shift?      @relation(fields: [shiftId], references: [id])
-  userId      String?
-  createdAt   DateTime    @default(now())
+  approvalId      String?
+  shiftId         String?
+  shift           Shift?      @relation(fields: [shiftId], references: [id])
+  userId          String?
+  createdAt       DateTime    @default(now())
 
   items SaleReturnItem[]
 }
@@ -1089,21 +1100,21 @@ model Expense {
 
 /// Ledger account in the chart of accounts. `group` follows Tally's group names so exports map 1:1.
 model Account {
-  id                String      @id @default(cuid())
-  code              String      @unique
-  name              String      @unique
+  id                String           @id @default(cuid())
+  code              String           @unique
+  name              String           @unique
   type              AccountType
   /// e.g. "Sundry Debtors", "Duties & Taxes", "Indirect Expenses"
   group             String
   /// Fixed key used by automatic postings (CASH, BANK, DEBTORS…); such accounts cannot be deleted
-  key               String?     @unique
+  key               String?          @unique
   /// Expense category this account was created for
-  expenseCategoryId String?     @unique
+  expenseCategoryId String?          @unique
   expenseCategory   ExpenseCategory? @relation(fields: [expenseCategoryId], references: [id])
   /// Opening balance at the start of the books; debit positive, credit negative
-  openingBalance    Decimal     @default(0) @db.Decimal(14, 2)
-  isActive          Boolean     @default(true)
-  createdAt         DateTime    @default(now())
+  openingBalance    Decimal          @default(0) @db.Decimal(14, 2)
+  isActive          Boolean          @default(true)
+  createdAt         DateTime         @default(now())
 
   lines JournalLine[]
 
@@ -1418,14 +1429,14 @@ model SchemeProduct {
 
 /// Customer groups with a fixed discount, e.g. FPO 3 %, bulk buyer 2 % above ₹25,000
 model CustomerType {
-  id                String     @id @default(cuid())
-  name              String     @unique
-  discountPct       Decimal    @default(0) @db.Decimal(5, 2)
+  id                String   @id @default(cuid())
+  name              String   @unique
+  discountPct       Decimal  @default(0) @db.Decimal(5, 2)
   /// Discount applies only when the bill (after schemes) reaches this amount
-  minBill           Decimal    @default(0) @db.Decimal(14, 2)
-  excludeSubsidised Boolean    @default(true)
-  isActive          Boolean    @default(true)
-  createdAt         DateTime   @default(now())
+  minBill           Decimal  @default(0) @db.Decimal(14, 2)
+  excludeSubsidised Boolean  @default(true)
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
 
   customers Customer[]
 }

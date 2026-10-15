@@ -1,6 +1,14 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import dns from 'node:dns';
+import net from 'node:net';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../generated/prisma/client.js';
+
+// Node races IPv6 and IPv4 with only 250ms per attempt ("happy eyeballs"). IPv6 to Neon is unreachable here and
+// IPv4 takes longer than 250ms, so connections failed at random with ETIMEDOUT. Connect over IPv4 only instead,
+// so connectionTimeoutMillis below is the timeout that applies.
+dns.setDefaultResultOrder('ipv4first');
+net.setDefaultAutoSelectFamily(false);
 
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {

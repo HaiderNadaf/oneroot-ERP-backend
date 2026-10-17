@@ -18,6 +18,7 @@ import type { Prisma } from '../generated/prisma/client.js';
 import type { NotificationType } from '../generated/prisma/enums.js';
 import { permittedWhere, type Permission } from '../common/permissions.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { RedisService } from '../redis/redis.module.js';
 
 type Db = PrismaService | Prisma.TransactionClient;
 
@@ -39,7 +40,10 @@ export class NotificationsService implements OnApplicationBootstrap, OnModuleDes
   private readonly logger = new Logger(NotificationsService.name);
   private timer?: NodeJS.Timeout;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   /** Send to specific users (duplicates and nulls are ignored) */
   async toUsers(userIds: (string | null | undefined)[], input: NotifyInput, db: Db = this.prisma) {
@@ -86,8 +90,10 @@ export class NotificationsService implements OnApplicationBootstrap, OnModuleDes
 
   onApplicationBootstrap() {
     // First scan shortly after start-up, then every 6 hours. Daily dedupe keys stop repeats.
-    setTimeout(() => void this.scan(), 15_000).unref();
-    this.timer = setInterval(() => void this.scan(), SCAN_EVERY_MS);
+    // With several API instances only one scans at a time
+    const run = () => void this.redis.runExclusive('notifications-scan', 10 * 60_000, () => this.scan());
+    setTimeout(run, 15_000).unref();
+    this.timer = setInterval(run, SCAN_EVERY_MS);
     this.timer.unref();
   }
 

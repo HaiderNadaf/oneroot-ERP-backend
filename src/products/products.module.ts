@@ -8,6 +8,7 @@ import {
   Injectable,
   Logger,
   Module,
+  NotFoundException,
   Param,
   Patch,
   Post,
@@ -32,6 +33,7 @@ import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { barcodePng, storeBarcode } from '../common/barcode.js';
 import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
+import { PRODUCT_READ } from '../common/permissions.js';
 import { nextSku, peekSku, withUniqueSku } from '../common/sku.js';
 import { paged, paging, startOfDay, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
@@ -153,9 +155,9 @@ export class ProductsService {
     private readonly storage: StorageService,
   ) {}
 
-  /** GET response shape: the SKU goes out as skuCode (barcodeImageUrl is already a short public link) */
-  private toResponse<T extends { sku: string }>({ sku, ...rest }: T) {
-    return { ...rest, skuCode: sku };
+  /** GET response shape: the SKU goes out as sku (what the app reads) and skuCode (barcodeImageUrl is already a short public link) */
+  private toResponse<T extends { sku: string }>(product: T) {
+    return { ...product, skuCode: product.sku };
   }
 
   /**
@@ -314,6 +316,24 @@ export class ProductsService {
     });
   }
 
+  /**
+   * Product for a scanned code: its barcode, else its SKU, else a serial number of one of its units.
+   * Answers with the same details as get() (stock in the branch, batches), so a scan can show the product at once.
+   */
+  async findByCode(code: string, branchId: string | null = null) {
+    const c = code.trim();
+    if (!c) throw new NotFoundException('Scan or type a barcode');
+    const match = { equals: c, mode: 'insensitive' as const };
+    const hit =
+      (await this.prisma.product.findFirst({ where: { barcode: match }, select: { id: true } })) ??
+      (await this.prisma.product.findFirst({ where: { sku: match }, select: { id: true } })) ??
+      (await this.prisma.serialNumber.findFirst({ where: { serialNo: match }, select: { productId: true }, orderBy: { createdAt: 'desc' } }).then((s) =>
+        s ? { id: s.productId } : null,
+      ));
+    if (!hit) throw new NotFoundException(`No product with barcode ${c}`);
+    return this.get(hit.id, branchId);
+  }
+
   /** SKU the next product in this sub-category would get — for the form preview */
   async previewSku(subCategoryId: string | undefined) {
     if (!subCategoryId) return { sku: null };
@@ -444,8 +464,9 @@ export class ProductsService {
   }
 }
 
+// Reads are open to the selling / buying screens too (PRODUCT_READ); every change keeps its own products.manage check
 @Controller('products')
-@Can('products.view')
+@Can(...PRODUCT_READ)
 export class ProductsController {
   constructor(private readonly products: ProductsService) {}
 
@@ -457,6 +478,12 @@ export class ProductsController {
   @Get('next-sku')
   nextSku(@Query('subCategoryId') subCategoryId?: string) {
     return this.products.previewSku(subCategoryId || undefined);
+  }
+
+  /** Barcode scanned anywhere in the app (or typed): the product it belongs to. Declared before :id so it isn't taken for one. */
+  @Get('scan/:code')
+  scan(@Param('code') code: string, @BranchId() branchId: string | null) {
+    return this.products.findByCode(code, branchId);
   }
 
   @Get(':id')

@@ -21,7 +21,10 @@
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
-    "migrate:deploy": "prisma migrate deploy"
+    "migrate:deploy": "prisma migrate deploy",
+    "sku:renumber": "nest build && node dist/scripts/renumber-skus.js",
+    "products:reset": "nest build && node dist/scripts/reset-products.js",
+    "users:test": "nest build && node dist/scripts/create-test-users.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1152.0",

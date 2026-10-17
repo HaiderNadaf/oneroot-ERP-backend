@@ -41,7 +41,7 @@ export class ApprovalsService {
     await db.approvalBand.create({ data: { upTo: null, steps: 1 } });
   }
 
-  private readonly cache = new TtlCache<number, Awaited<ReturnType<ApprovalsService['loadConfig']>>>(60_000);
+  private readonly cache = new TtlCache<number, Awaited<ReturnType<ApprovalsService['loadConfig']>>>('po-approval-config', 60_000);
 
   /** Approval steps and bands (cached for a minute; refreshed when an admin saves the rules) */
   config(db: Db = this.prisma) {
@@ -62,7 +62,7 @@ export class ApprovalsService {
   }
 
   async updateConfig(dto: ApprovalConfigInput) {
-    this.cache.clear();
+    await this.cache.clear();
     if (!dto.steps.length) throw new BadRequestException('Add at least one approval step');
     if (!dto.bands.length) throw new BadRequestException('Add at least one value band');
     for (const b of dto.bands) {
@@ -82,7 +82,7 @@ export class ApprovalsService {
       }),
       this.prisma.approvalBand.createMany({ data: bands.map((b) => ({ upTo: b.upTo, steps: b.steps })) }),
     ]);
-    this.cache.clear();
+    await this.cache.clear();
     return this.config();
   }
 

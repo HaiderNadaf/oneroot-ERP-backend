@@ -1,7 +1,7 @@
 import { BadRequestException, Body, Controller, Injectable, Module, Post } from '@nestjs/common';
 import { IsArray, IsBoolean, IsOptional } from 'class-validator';
 import { BranchId, Can, CurrentUser, type AuthUser } from '../common/decorators.js';
-import { SKU_SEQ_KEY, formatSku } from '../common/sku.js';
+import { formatSku, skuSeqKey } from '../common/sku.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ProductsModule, ProductsService, assertNotDuplicate, sameProduct } from './products.module.js';
 
@@ -66,14 +66,17 @@ export class ImportService {
     const findIn = <T extends { name: string; code: string | null }>(list: T[], raw: string) =>
       list.find((c) => c.name.trim().toLowerCase() === raw.toLowerCase()) ?? list.find((c) => c.code === raw) ?? null;
     // Next running number (shared by all products), so the check step can show the SKU each new row will get
-    let nextRun: number | undefined;
-    const predictSku = async (categoryCode: string, subCategoryCode: string) => {
-      if (nextRun === undefined) {
-        const seq = await this.prisma.sequence.findUnique({ where: { key: SKU_SEQ_KEY } });
-        nextRun = (seq?.value ?? 0) + 1;
+    // Check-only preview: the SKU each new row would get, counting per sub-category (as nextSku does on save)
+    const nextRun = new Map<string, number>();
+    const predictSku = async (subCategoryId: string, categoryCode: string, subCategoryCode: string) => {
+      let n = nextRun.get(subCategoryId);
+      if (n === undefined) {
+        const seq = await this.prisma.sequence.findUnique({ where: { key: skuSeqKey(subCategoryId) } });
+        n = (seq?.value ?? 0) + 1;
       }
+      nextRun.set(subCategoryId, n + 1);
       try {
-        return formatSku(nextRun++, categoryCode, subCategoryCode);
+        return formatSku(n, categoryCode, subCategoryCode);
       } catch {
         return undefined;
       }
@@ -229,7 +232,7 @@ export class ImportService {
       const clean = Object.fromEntries(Object.entries(data).filter(([, v]) => v !== undefined));
 
       if (!dto.commit) {
-        if (res.action === 'create' && category?.code && parent?.code) res.sku = await predictSku(parent.code, category.code);
+        if (res.action === 'create' && category?.code && parent?.code) res.sku = await predictSku(category.id, parent.code, category.code);
         if (res.action === 'create') created++;
         else updated++;
         results.push(res);

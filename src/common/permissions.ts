@@ -6,18 +6,18 @@ import type { Role } from '../generated/prisma/enums.js';
  * ADMIN bypasses every check. Keep this list identical to frontend/lib/permissions.ts.
  */
 export const PERMISSIONS = [
-  // Sales & customers
-  { key: 'sales.bill', section: 'Sales & customers', label: 'Bill at the counter (POS), invoices, held bills and receipts', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
-  { key: 'sales.returns', section: 'Sales & customers', label: 'Sales returns and credit notes', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
-  { key: 'sales.cancel', section: 'Sales & customers', label: 'Cancel an invoice', roles: ['MANAGER'] },
-  { key: 'sales.van', section: 'Sales & customers', label: 'Run van sales trips: load stock, bill on the route, close the trip', roles: ['MANAGER', 'CASHIER'] },
-  { key: 'customers.view', section: 'Sales & customers', label: 'Customers, ledgers and due reminders', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
-  { key: 'customers.manage', section: 'Sales & customers', label: 'Add and edit customers, log follow-ups, send a reminder', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
-  { key: 'customers.delete', section: 'Sales & customers', label: 'Delete customers', roles: ['MANAGER'] },
-  { key: 'customers.remind', section: 'Sales & customers', label: 'Send reminders to everyone overdue and run auto-reminders', roles: ['MANAGER', 'ACCOUNTANT'] },
-  { key: 'approvals.decide', section: 'Sales & customers', label: 'Approve or reject override requests (inbox and counter PIN), lift credit limits', roles: ['MANAGER'] },
+  // Sales & Customers
+  { key: 'sales.bill', section: 'Sales & Customers', label: 'Bill at the counter (POS), invoices, held bills and receipts', roles: ['MANAGER', 'CASHIER'] },
+  { key: 'sales.returns', section: 'Sales & Customers', label: 'Sales returns and credit notes', roles: ['MANAGER', 'CASHIER'] },
+  { key: 'sales.cancel', section: 'Sales & Customers', label: 'Cancel an invoice', roles: ['MANAGER'] },
+  { key: 'sales.van', section: 'Sales & Customers', label: 'Run van sales trips: load stock, bill on the route, close the trip', roles: ['MANAGER', 'CASHIER'] },
+  { key: 'customers.view', section: 'Sales & Customers', label: 'Customers, ledgers and due reminders', roles: ['MANAGER', 'CASHIER'] },
+  { key: 'customers.manage', section: 'Sales & Customers', label: 'Add and edit customers, log follow-ups, send a reminder', roles: ['MANAGER', 'CASHIER'] },
+  { key: 'customers.delete', section: 'Sales & Customers', label: 'Delete customers', roles: ['MANAGER'] },
+  { key: 'customers.remind', section: 'Sales & Customers', label: 'Send reminders to everyone overdue and run auto-reminders', roles: ['MANAGER'] },
+  { key: 'approvals.decide', section: 'Sales & Customers', label: 'Approve or reject override requests (inbox and counter PIN), lift credit limits', roles: ['MANAGER'] },
   // Purchases
-  { key: 'vendors.view', section: 'Purchases', label: 'Vendors and their ledgers', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
+  { key: 'vendors.view', section: 'Purchases', label: 'Vendors and their ledgers', roles: ['MANAGER', 'ACCOUNTANT'] },
   { key: 'vendors.manage', section: 'Purchases', label: 'Add and edit vendors', roles: ['MANAGER', 'ACCOUNTANT'] },
   { key: 'vendors.delete', section: 'Purchases', label: 'Delete vendors', roles: ['MANAGER'] },
   { key: 'purchases.view', section: 'Purchases', label: 'Purchase orders, goods inward, purchase invoices and debit notes', roles: ['MANAGER', 'ACCOUNTANT'] },
@@ -26,16 +26,16 @@ export const PERMISSIONS = [
   { key: 'purchases.receive', section: 'Purchases', label: 'Receive goods against a purchase order (GRN)', roles: ['MANAGER'] },
   { key: 'purchases.cancel', section: 'Purchases', label: 'Cancel purchase orders and purchase invoices', roles: ['MANAGER'] },
   // Inventory
-  { key: 'products.view', section: 'Inventory', label: 'Products and categories', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
+  { key: 'products.view', section: 'Inventory', label: 'Products and categories', roles: ['MANAGER'] },
   { key: 'products.manage', section: 'Inventory', label: 'Add, edit and delete products, categories and barcodes', roles: ['MANAGER'] },
-  { key: 'inventory.view', section: 'Inventory', label: 'Stock, batches and stock movements', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
-  { key: 'inventory.adjust', section: 'Inventory', label: 'Adjust stock and write off damaged or expired batches (above the role limit an approver signs off)', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
+  { key: 'inventory.view', section: 'Inventory', label: 'Stock, batches and stock movements', roles: ['MANAGER'] },
+  { key: 'inventory.adjust', section: 'Inventory', label: 'Adjust stock and write off damaged or expired batches (above the role limit an approver signs off)', roles: ['MANAGER'] },
   { key: 'inventory.transfer', section: 'Inventory', label: 'Transfer stock between branches', roles: ['MANAGER'] },
-  { key: 'inventory.govt', section: 'Inventory', label: 'Government fertiliser stock match', roles: ['MANAGER', 'ACCOUNTANT'] },
+  { key: 'inventory.govt', section: 'Inventory', label: 'Government fertiliser stock match', roles: ['MANAGER'] },
   // Finance
   { key: 'cash.shifts', section: 'Finance', label: 'Open and close own shifts', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
   { key: 'cash.manage', section: 'Finance', label: 'Cash reconciliation, bank deposits and closing other staff’s shifts', roles: ['MANAGER', 'ACCOUNTANT'] },
-  { key: 'payments.view', section: 'Finance', label: 'Payments received and made', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
+  { key: 'payments.view', section: 'Finance', label: 'Payments received and made', roles: ['MANAGER', 'ACCOUNTANT'] },
   { key: 'payments.record', section: 'Finance', label: 'Record customer receipts', roles: ['MANAGER', 'CASHIER', 'ACCOUNTANT'] },
   { key: 'payments.vendor', section: 'Finance', label: 'Pay vendors', roles: ['MANAGER', 'ACCOUNTANT'] },
   { key: 'payments.delete', section: 'Finance', label: 'Delete a payment', roles: ['MANAGER', 'ACCOUNTANT'] },
@@ -59,6 +59,12 @@ export const PERMISSION_KEYS: readonly Permission[] = PERMISSIONS.map((p) => p.k
 
 const KEY_SET = new Set<string>(PERMISSION_KEYS);
 export const isPermission = (key: string): key is Permission => KEY_SET.has(key);
+
+/**
+ * Product lookups for the screens that sell, buy or move them (POS, returns, van loads, purchase bills, debit notes,
+ * stock adjustments and transfers), without opening the Products page itself (products.view)
+ */
+export const PRODUCT_READ: Permission[] = ['products.view', 'sales.bill', 'sales.returns', 'sales.van', 'purchases.view', 'inventory.view', 'inventory.adjust', 'inventory.transfer'];
 
 /** What a role gets when a user is created (or their role changed) without explicit ticks */
 export function defaultsFor(role: Role): Permission[] {

@@ -11,13 +11,16 @@ const SKU_DIGITS = 11;
 /** Category / sub-category code: 1 to 999, no leading zero */
 export const CODE_PATTERN = /^[1-9]\d{0,2}$/;
 
-/** Running-number row behind every SKU */
-export const SKU_SEQ_KEY = `SKU-${SKU_PREFIX}`;
+/**
+ * Running-number row of one sub-category: each category + sub-category pair counts its own products 1, 2, 3 …
+ * (Sequence rows are created on first use.)
+ */
+export const skuSeqKey = (subCategoryId: string) => `SKU-${SKU_PREFIX}-${subCategoryId}`;
 
 /**
- * ORI + category code + sub-category code + running number, the running number padded so the digits come to 11.
- * e.g. Farm Machinery (1) → sub-category 2 → product #1 = ORI1 2 000000001 = ORI12000000001.
- * The running number is shared by all products, so the SKU stays unique even when two code pairs read alike (1+12 / 11+2).
+ * ORI + category code + sub-category code + that sub-category's running number, padded so the digits come to 11.
+ * e.g. Farm Machinery (1) → sub-category 2: the 1st product is ORI12000000001, the 2nd ORI12000000002, …
+ * Two code pairs can read alike (1+12 / 11+2); the unique index on Product.sku catches that and the number is skipped.
  */
 export function formatSku(n: number, categoryCode: string, subCategoryCode: string) {
   const prefix = `${categoryCode}${subCategoryCode}`;
@@ -42,27 +45,32 @@ async function placeOf(db: Prisma.TransactionClient, subCategoryId: string | und
   return {
     type: sub.category.type as ProductType | null,
     categoryId: sub.categoryId,
+    seqKey: skuSeqKey(sub.id),
     format: (n: number) => formatSku(n, sub.category.code!, sub.code!),
   };
 }
 
 /** SKU the next product in this sub-category would get, without using it up (form preview) */
 export async function peekSku(db: Prisma.TransactionClient, subCategoryId: string) {
-  const { format } = await placeOf(db, subCategoryId);
-  const seq = await db.sequence.findUnique({ where: { key: SKU_SEQ_KEY } });
+  const { format, seqKey } = await placeOf(db, subCategoryId);
+  const seq = await db.sequence.findUnique({ where: { key: seqKey } });
   for (let n = (seq?.value ?? 0) + 1; ; n++) {
     const sku = format(n);
     if (!(await db.product.findUnique({ where: { sku } }))) return sku;
   }
 }
 
-/** Allocates the next unique SKU, skipping any number already in the table; also returns the sub-category's tax type and category id */
+/**
+ * Allocates the next number of this sub-category and its SKU, skipping any already in the table; also returns the
+ * sub-category's tax type and category id. The upsert locks the sub-category's Sequence row until the transaction
+ * ends, so two products saved at once in the same sub-category get different numbers.
+ */
 export async function nextSku(db: Prisma.TransactionClient, subCategoryId: string | undefined) {
-  const { type, categoryId, format } = await placeOf(db, subCategoryId);
+  const { type, categoryId, format, seqKey } = await placeOf(db, subCategoryId);
   for (;;) {
     const seq = await db.sequence.upsert({
-      where: { key: SKU_SEQ_KEY },
-      create: { key: SKU_SEQ_KEY, value: 1 },
+      where: { key: seqKey },
+      create: { key: seqKey, value: 1 },
       update: { value: { increment: 1 } },
     });
     const sku = format(seq.value);

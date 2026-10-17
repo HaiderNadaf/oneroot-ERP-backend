@@ -167,7 +167,7 @@ export class UsersService {
     if (pin && !mayHoldPin({ role, permissions: permissions ?? current.permissions })) {
       throw new BadRequestException('Only users who may approve overrides can hold an approval PIN');
     }
-    userCache.delete(id);
+    await userCache.delete(id);
     const user = await this.prisma.user.update({
       where: { id },
       data: {
@@ -182,7 +182,7 @@ export class UsersService {
       },
       select: publicFields,
     });
-    userCache.delete(id);
+    await userCache.delete(id);
     await this.audit.log(by.id, 'UPDATE', 'User', id, { ...rest, role, roleTemplate: tpl?.name, permissions, extraPermissions: access?.extraPermissions, revokedPermissions: access?.revokedPermissions, passwordChanged: !!password, pinChanged: pin !== undefined });
     return strip(user);
   }

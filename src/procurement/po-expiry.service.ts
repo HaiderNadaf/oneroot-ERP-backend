@@ -3,6 +3,7 @@ import { startOfDay } from '../common/utils.js';
 import type { PurchaseOrderStatus } from '../generated/prisma/enums.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { RedisService } from '../redis/redis.module.js';
 
 /** Open POs that lapse when their validity runs out; anything with goods received (or closed) is kept */
 const EXPIRABLE: PurchaseOrderStatus[] = ['DRAFT', 'PENDING_APPROVAL', 'SENT_BACK', 'APPROVED'];
@@ -23,11 +24,14 @@ export class PoExpiryService implements OnApplicationBootstrap, OnModuleDestroy 
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly redis: RedisService,
   ) {}
 
   onApplicationBootstrap() {
-    setTimeout(() => void this.run(), 20_000).unref();
-    this.timer = setInterval(() => void this.run(), RUN_EVERY_MS);
+    // With several API instances only one runs at a time
+    const run = () => void this.redis.runExclusive('po-expiry', 10 * 60_000, () => this.run());
+    setTimeout(run, 20_000).unref();
+    this.timer = setInterval(run, RUN_EVERY_MS);
     this.timer.unref();
   }
 

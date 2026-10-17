@@ -124,7 +124,7 @@ export class RolesService {
       await refreshUsers(tx, { roleTemplateId: id });
       return r;
     }, TX_OPTIONS);
-    userCache.clear();
+    await userCache.clear();
     await this.audit.log(by.id, 'UPDATE', 'RoleTemplate', id, { name, department: row.department?.name ?? null, baseRole: dto.baseRole, permissions });
     return shapeRole(row);
   }
@@ -163,7 +163,7 @@ export class RolesService {
       await tx.rolePermission.upsert({ where: { role: r }, create: { role: r, permissions }, update: { permissions } });
       return refreshUsers(tx, { role: r, roleTemplateId: null });
     }, TX_OPTIONS);
-    userCache.clear();
+    await userCache.clear();
     await this.audit.log(by.id, 'UPDATE', 'RolePermission', r, { permissions, users });
     return { role: r, permissions, defaults: defaultsFor(r), userCount: users };
   }

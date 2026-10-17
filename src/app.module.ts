@@ -21,6 +21,7 @@ import { ProcurementModule } from './procurement/procurement.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { PricingModule } from './pricing/pricing.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
+import { RedisModule } from './redis/redis.module.js';
 import { ImportModule } from './products/import.service.js';
 import { ProductsModule } from './products/products.module.js';
 import { SerialsModule } from './products/serials.module.js';
@@ -47,6 +48,7 @@ import { RetryReadsOnDbBlip } from './common/db-retry.interceptor.js';
       signOptions: { expiresIn: (process.env.JWT_EXPIRES_IN ?? '7d') as `${number}d` },
     }),
     PrismaModule,
+    RedisModule,
     StorageModule,
     HealthModule,
     AuditModule,

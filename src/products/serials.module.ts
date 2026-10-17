@@ -3,6 +3,7 @@ import { ArrayMinSize, IsArray, IsOptional, IsString } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
 import { BranchId, Can, CurrentUser, needBranch, type AuthUser } from '../common/decorators.js';
 import type { Prisma } from '../generated/prisma/client.js';
+import { PRODUCT_READ } from '../common/permissions.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
 type Db = Prisma.TransactionClient | PrismaService;
@@ -134,7 +135,7 @@ export class ProductSerialsController {
   ) {}
 
   @Get()
-  @Can('products.view')
+  @Can(...PRODUCT_READ)
   list(@Param('id') id: string, @Query('status') status: string | undefined, @BranchId() branchId: string | null) {
     return this.serials.list(id, branchId, status);
   }

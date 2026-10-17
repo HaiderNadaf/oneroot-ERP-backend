@@ -64,6 +64,6 @@ export async function refreshUsers(db: Db, where: Prisma.UserWhereInput) {
     const permissions = u.role === 'ADMIN' ? [] : effectivePermissions(baseCache.get(key)!, u.extraPermissions, u.revokedPermissions);
     await db.user.update({ where: { id: u.id }, data: { permissions } });
   }
-  userCache.clear();
+  await userCache.clear();
   return users.length;
 }

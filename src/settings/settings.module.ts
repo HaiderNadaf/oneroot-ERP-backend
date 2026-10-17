@@ -42,7 +42,7 @@ const whatsappConfigured = () => !!(process.env.WHATSAPP_TOKEN && process.env.WH
 export class SettingsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private readonly cache = new TtlCache<number, StoreSettings>(5 * 60_000);
+  private readonly cache = new TtlCache<number, StoreSettings>('store-settings', 5 * 60_000);
 
   get() {
     return this.cache.getOrLoad(1, async () => {

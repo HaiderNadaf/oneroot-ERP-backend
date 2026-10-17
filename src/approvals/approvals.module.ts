@@ -96,7 +96,7 @@ export interface AuthorizeOptions {
  */
 @Injectable()
 export class ApprovalsService implements OnApplicationBootstrap {
-  private readonly cache = new TtlCache<string, Record<Role, Limits>>(60_000);
+  private readonly cache = new TtlCache<string, Record<Role, Limits>>('role-limits', 60_000);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -145,7 +145,7 @@ export class ApprovalsService implements OnApplicationBootstrap {
       ...(dto.seeCostPrice !== undefined ? { seeCostPrice: dto.seeCostPrice } : {}),
     };
     const saved = await this.prisma.roleLimit.upsert({ where: { role }, create: { role, ...DEFAULT_LIMITS[role], ...data }, update: data });
-    this.cache.clear();
+    await this.cache.clear();
     await this.audit.log(by.id, 'UPDATE', 'RoleLimit', role, { ...data });
     return saved;
   }

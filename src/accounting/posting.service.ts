@@ -77,7 +77,7 @@ const ADJUSTMENT_MOVES = ['ADJUSTMENT_IN', 'ADJUSTMENT_OUT', 'EXPIRED', 'DAMAGED
 @Injectable()
 export class PostingService implements OnApplicationBootstrap {
   private readonly logger = new Logger(PostingService.name);
-  private readonly idCache = new TtlCache<string, Record<string, string>>(10 * 60_000);
+  private readonly idCache = new TtlCache<string, Record<string, string>>('account-ids', 10 * 60_000);
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -93,7 +93,7 @@ export class PostingService implements OnApplicationBootstrap {
     const have = new Set((await db.account.findMany({ where: { key: { in: SYSTEM_ACCOUNTS.map((a) => a.key) } }, select: { key: true } })).map((a) => a.key));
     const missing = SYSTEM_ACCOUNTS.filter((a) => !have.has(a.key));
     if (missing.length) await db.account.createMany({ data: missing.map((a) => ({ ...a })) });
-    this.idCache.clear();
+    await this.idCache.clear();
   }
 
   private async ids(db: Db) {

@@ -77,7 +77,7 @@ export class BranchesService {
     const branch = await this.prisma.branch.create({
       data: { ...dto, code, name: dto.name.trim(), gstin: normalizeGstin(dto.gstin) || null },
     });
-    branchCache.clear();
+    await branchCache.clear();
     await this.audit.log(by.id, 'CREATE', 'Branch', branch.id, { code, name: branch.name });
     return branch;
   }
@@ -100,7 +100,7 @@ export class BranchesService {
         gstin: dto.gstin === undefined ? undefined : normalizeGstin(dto.gstin) || null,
       },
     });
-    branchCache.clear();
+    await branchCache.clear();
     await this.audit.log(by.id, 'UPDATE', 'Branch', id, { ...dto });
     return branch;
   }

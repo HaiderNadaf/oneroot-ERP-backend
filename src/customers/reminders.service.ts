@@ -20,6 +20,7 @@ import { num, round2, startOfDay, toDay } from '../common/utils.js';
 import { ReminderChannel } from '../generated/prisma/enums.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { RedisService } from '../redis/redis.module.js';
 import { overdueFromSales, type Overdue } from './credit.js';
 
 export const DEFAULT_REMINDER_TEMPLATE =
@@ -69,11 +70,14 @@ export class RemindersService implements OnApplicationBootstrap, OnModuleDestroy
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly audit: AuditService,
+    private readonly redis: RedisService,
   ) {}
 
   onApplicationBootstrap() {
-    setTimeout(() => void this.daily(), 45_000).unref();
-    this.timer = setInterval(() => void this.daily(), RUN_EVERY_MS);
+    // One instance at a time, so two instances never send the same WhatsApp reminders together
+    const run = () => void this.redis.runExclusive('customer-reminders', 30 * 60_000, () => this.daily());
+    setTimeout(run, 45_000).unref();
+    this.timer = setInterval(run, RUN_EVERY_MS);
     this.timer.unref();
   }
 

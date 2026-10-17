@@ -52,9 +52,9 @@ export class AuthGuard implements CanActivate {
       const wanted = String(req.headers['x-branch-id'] ?? '').trim();
       if (wanted && wanted !== 'all') {
         const active = await branchCache.getOrLoad('active', async () =>
-          new Set((await this.prisma.branch.findMany({ where: { isActive: true }, select: { id: true } })).map((b) => b.id)),
+          (await this.prisma.branch.findMany({ where: { isActive: true }, select: { id: true } })).map((b) => b.id),
         );
-        if (!active.has(wanted)) throw new ForbiddenException('That branch does not exist or is inactive');
+        if (!active.includes(wanted)) throw new ForbiddenException('That branch does not exist or is inactive');
         req.branchId = wanted;
       } else {
         req.branchId = null;

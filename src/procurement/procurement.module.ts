@@ -1864,8 +1864,9 @@ export class PurchaseOrdersController {
   }
 }
 
+// Storekeepers who receive goods (purchases.receive) see the goods-inward list and the GRNs they post
 @Controller('grns')
-@Can('purchases.view')
+@Can('purchases.view', 'purchases.receive')
 export class GrnsController {
   constructor(private readonly svc: ProcurementService) {}
 

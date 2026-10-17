@@ -65,13 +65,86 @@ export class DashboardService implements OnApplicationBootstrap {
     setTimeout(() => void dashboardCache.getOrLoad('month:all', () => this.compute('month')).catch(() => {}), 5_000).unref();
   }
 
-  /** Cached per period and branch (cleared on any write); the greeting is filled in per user */
+  /**
+   * Cached per period and branch (cleared on any write); the greeting is filled in per user, and each section is
+   * kept only for users allowed to see it (withheld: null, [] or 0), so the figures never reach the browser
+   */
   async summary(user: AuthUser, periodParam?: string, branchId: string | null = null) {
     const period: Period = periodParam === 'today' || periodParam === 'fy' ? periodParam : 'month';
     const data = (await dashboardCache.getOrLoad(`${period}:${branchId ?? 'all'}`, () =>
       this.compute(period, branchId),
     )) as Awaited<ReturnType<DashboardService['compute']>>;
-    return { ...data, greetingName: user.name.split(' ')[0] };
+    return { ...this.visibleTo(user, data), greetingName: user.name.split(' ')[0] };
+  }
+
+  /** The parts of the dashboard this user's permissions cover */
+  private visibleTo(user: AuthUser, data: Awaited<ReturnType<DashboardService['compute']>>) {
+    const may = (...keys: Permission[]) => hasPerm(user, ...keys);
+    const finance = may('reports.view');
+    const sales = may('sales.bill', 'reports.view');
+    const collected = may('payments.view', 'reports.view');
+    const dues = may('customers.view', 'reports.view');
+    const stock = may('inventory.view');
+    const purchasing = may('purchases.view');
+    const only = <T>(ok: boolean, v: T) => (ok ? v : null);
+    const { kpis, alerts, counts } = data;
+    return {
+      ...data,
+      kpis: {
+        sales: only(sales, { ...kpis.sales, grossProfit: only(finance, kpis.sales.grossProfit), netProfit: only(finance, kpis.sales.netProfit) }),
+        collected: only(collected, kpis.collected),
+        receivables: only(dues, kpis.receivables),
+        purchases: only(finance, kpis.purchases),
+      },
+      spark: data.spark.map((s) => ({
+        label: s.label,
+        sales: sales ? s.sales : 0,
+        purchases: finance ? s.purchases : 0,
+        collected: collected ? s.collected : 0,
+      })),
+      alerts: {
+        expiring7: only(stock, alerts.expiring7),
+        expired: only(stock, alerts.expired),
+        approvals: only(purchasing, alerts.approvals),
+        inwardDue: only(purchasing, alerts.inwardDue),
+        lowStock: only(stock, alerts.lowStock),
+        grnsToInvoice: only(purchasing, alerts.grnsToInvoice),
+        draftDebitNotes: only(purchasing, alerts.draftDebitNotes),
+        govtMismatches: only(may('inventory.govt'), alerts.govtMismatches),
+        cashGaps: only(may('cash.manage'), alerts.cashGaps),
+        openShifts: only(may('cash.manage'), alerts.openShifts),
+        approvalRequests: only(may('approvals.decide'), alerts.approvalRequests),
+        openVans: only(may('sales.van'), alerts.openVans),
+      },
+      split: only(sales, data.split),
+      cash: only(finance, data.cash),
+      trend: sales ? data.trend.map((m) => ({ ...m, purchases: finance ? m.purchases : 0 })) : [],
+      byCategory: sales ? data.byCategory : [],
+      // Stock value is a cost figure
+      expiring: stock ? data.expiring.map((b) => ({ ...b, value: finance ? b.value : 0 })) : [],
+      approvals: purchasing ? data.approvals : [],
+      recentSales: sales ? data.recentSales : [],
+      gst: only(finance, data.gst),
+      topProducts: sales ? data.topProducts : [],
+      topDues: dues ? data.topDues : [],
+      counts: {
+        customers: only(may('customers.view'), counts.customers),
+        vendors: only(may('vendors.view'), counts.vendors),
+        products: only(may('products.view'), counts.products),
+        batches: only(stock, counts.batches),
+        openPos: only(purchasing, counts.openPos),
+        users: only(may('admin.users'), counts.users),
+      },
+      branches: sales
+        ? data.branches.map((b) => ({
+            ...b,
+            margin: finance ? b.margin : 0,
+            purchases: finance ? b.purchases : 0,
+            stockValue: finance ? b.stockValue : 0,
+            dues: dues ? b.dues : 0,
+          }))
+        : [],
+    };
   }
 
   private async compute(period: Period, branchId: string | null = null) {

@@ -1266,7 +1266,8 @@ export class ProcurementService {
           const batch = await this.stock.add(tx, {
             productId: p.id,
             branchId,
-            batchNo: p.trackBatch ? batchNo : undefined,
+            // A batch number typed at inward is kept even when the product doesn't require one; without it stock goes to DEFAULT
+            batchNo: batchNo || undefined,
             mfgDate: r.mfgDate ? parseDay(r.mfgDate) : undefined,
             expiryDate: expiry,
             quantity: r.passedQty,

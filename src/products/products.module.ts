@@ -195,6 +195,8 @@ export class ProductsService {
     q: Paging & {
       search?: string;
       type?: string;
+      /** Products whose category uses this tax type */
+      taxTypeId?: string;
       categoryId?: string;
       subCategoryId?: string;
       status?: string;
@@ -209,6 +211,7 @@ export class ProductsService {
     const where: Prisma.ProductWhereInput = {
       type: (q.type as ProductType) || undefined,
       categoryId: q.categoryId || undefined,
+      ...(q.taxTypeId ? { category: { taxTypeId: q.taxTypeId } } : {}),
       subCategoryId: q.subCategoryId || undefined,
       isActive: q.status === 'inactive' ? false : q.status === 'all' ? undefined : true,
     };
@@ -254,7 +257,7 @@ export class ProductsService {
       this.prisma.product.findMany({
         where,
         include: {
-          category: { select: { id: true, name: true } },
+          category: { select: { id: true, name: true, taxType: { select: { id: true, name: true } } } },
           subCategory: { select: { id: true, name: true, fields: true } },
         },
         orderBy: [orderBy, { name: 'asc' }],
@@ -310,7 +313,7 @@ export class ProductsService {
       this.prisma.product.findUniqueOrThrow({
         where: { id },
         include: {
-          category: { select: { id: true, name: true, code: true, type: true } },
+          category: { select: { id: true, name: true, code: true, type: true, taxType: { select: { id: true, name: true } } } },
           subCategory: { select: { id: true, name: true, code: true, fields: true } },
           batches: {
             where: { quantity: { gt: 0 }, branchId: branchId ?? undefined },

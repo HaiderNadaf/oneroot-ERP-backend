@@ -193,19 +193,19 @@ export class ReportsService {
     };
   }
 
-  async stock(q: { type?: string }, branchId: string | null = null) {
+  async stock(q: { type?: string; taxTypeId?: string }, branchId: string | null = null) {
     const rows = await this.prisma.$queryRaw<
-      { id: string; sku: string; name: string; type: string; category: string | null; unit: string; stock: string; reorderLevel: string; salePrice: string; costValue: string | null }[]
+      { id: string; sku: string; name: string; type: string; taxTypeId: string | null; taxType: string | null; category: string | null; unit: string; stock: string; reorderLevel: string; salePrice: string; costValue: string | null }[]
     >`
-      SELECT p.id, p.sku_code AS sku, p.name, p.type::text AS type, c.name AS category, p.unit,
+      SELECT p.id, p.sku_code AS sku, p.name, p.type::text AS type, t.id AS "taxTypeId", t.name AS "taxType", c.name AS category, p.unit,
              COALESCE((SELECT SUM(b.quantity) FROM "Batch" b WHERE b."productId" = p.id ${andBranch('b', branchId)}), 0) AS stock,
              p."reorderLevel", p."salePrice",
              (SELECT SUM(b.quantity * b."costPrice") FROM "Batch" b WHERE b."productId" = p.id AND b.quantity > 0 ${andBranch('b', branchId)}) AS "costValue"
-      FROM "Product" p LEFT JOIN "Category" c ON c.id = p."categoryId"
+      FROM "Product" p LEFT JOIN "Category" c ON c.id = p."categoryId" LEFT JOIN "TaxType" t ON t.id = c."taxTypeId"
       WHERE p."isActive" = true
       ORDER BY p.name`;
     const items = rows
-      .filter((r) => !q.type || r.type === q.type)
+      .filter((r) => (!q.type || r.type === q.type) && (!q.taxTypeId || r.taxTypeId === q.taxTypeId))
       .map((r) => ({
         ...r,
         stock: num(r.stock),
@@ -385,7 +385,7 @@ export class ReportsController {
   }
 
   @Get('stock')
-  stock(@Query() q: { type?: string }, @BranchId() branchId: string | null) {
+  stock(@Query() q: { type?: string; taxTypeId?: string }, @BranchId() branchId: string | null) {
     return this.reports.stock(q, branchId);
   }
 

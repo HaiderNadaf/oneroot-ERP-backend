@@ -326,7 +326,6 @@ export class TaxTypesController {
   @Can('products.manage')
   async remove(@Param('id') id: string) {
     const t = await this.prisma.taxType.findUniqueOrThrow({ where: { id }, include: { _count: { select: { categories: true } } } });
-    if (t.builtIn) throw new BadRequestException('Built-in tax types cannot be deleted — switch it off instead');
     if (t._count.categories) throw new BadRequestException(`${t._count.categories} categor${t._count.categories === 1 ? 'y uses' : 'ies use'} ${t.name} — move them first`);
     return this.prisma.taxType.delete({ where: { id } });
   }

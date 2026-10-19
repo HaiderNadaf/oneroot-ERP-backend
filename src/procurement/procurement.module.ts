@@ -1103,6 +1103,57 @@ export class ProcurementService {
       }));
   }
 
+  /**
+   * Receipt progress for the dashboard: POs partly received and POs fully received (latest first),
+   * with ordered / received / accepted quantities, shortfall and their GRNs.
+   */
+  async receiptProgress(branchId: string | null, limit = 10) {
+    const base: Prisma.PurchaseOrderWhereInput = { deletedAt: null, branchId: branchId ?? undefined };
+    const include = {
+      vendor: { select: { id: true, name: true } },
+      branch: { select: { code: true, name: true } },
+      items: { select: { quantity: true, passedQty: true, rejectedQty: true, damagedQty: true, expiredQty: true, product: { select: { unit: true } } } },
+      grns: { select: { id: true, grnNo: true, receivedAt: true }, orderBy: { receivedAt: 'desc' as const } },
+    };
+    const [partial, full, counts] = await Promise.all([
+      this.prisma.purchaseOrder.findMany({ where: { ...base, status: 'PARTIALLY_RECEIVED' }, orderBy: { updatedAt: 'desc' }, take: limit, include }),
+      this.prisma.purchaseOrder.findMany({ where: { ...base, status: 'RECEIVED' }, orderBy: { updatedAt: 'desc' }, take: limit, include }),
+      this.prisma.purchaseOrder.groupBy({ by: ['status'], where: { ...base, status: { in: ['PARTIALLY_RECEIVED', 'RECEIVED'] } }, _count: true }),
+    ]);
+    const row = (po: (typeof partial)[number]) => {
+      const sum = (f: (i: (typeof po.items)[number]) => unknown) => round3(po.items.reduce((t, i) => t + num(f(i)), 0));
+      const ordered = sum((i) => i.quantity);
+      const accepted = sum((i) => i.passedQty);
+      const received = round3(accepted + sum((i) => i.rejectedQty) + sum((i) => i.damagedQty) + sum((i) => i.expiredQty));
+      const units = [...new Set(po.items.map((i) => i.product.unit))];
+      return {
+        id: po.id,
+        poNo: po.poNo,
+        status: po.status,
+        orderDate: po.orderDate,
+        vendor: po.vendor,
+        branch: po.branch,
+        /** The unit when every line uses the same one, else null (quantities then mix units) */
+        unit: units.length === 1 ? units[0] : null,
+        lines: po.items.length,
+        linesComplete: po.items.filter((i) => pendingQty(i) <= 0).length,
+        orderedQty: ordered,
+        receivedQty: received,
+        acceptedQty: accepted,
+        shortfallQty: round3(Math.max(0, ordered - received)),
+        receivedPct: ordered > 0 ? Math.min(100, Math.round((received / ordered) * 100)) : 0,
+        grnCount: po.grns.length,
+        lastGrn: po.grns[0] ?? null,
+      };
+    };
+    const count = (st: string) => counts.find((c) => c.status === st)?._count ?? 0;
+    return {
+      partial: partial.map(row),
+      full: full.map(row),
+      counts: { partial: count('PARTIALLY_RECEIVED'), full: count('RECEIVED') },
+    };
+  }
+
   async createGrn(poId: string, dto: CreateGrnDto, user: AuthUser, currentBranch: string | null = null) {
     const { grn, sms } = await this.prisma.$transaction(async (tx) => {
       const po = await tx.purchaseOrder.findUniqueOrThrow({
@@ -1941,6 +1992,12 @@ export class GrnsController {
   @Get('pending')
   pending(@BranchId() branchId: string | null) {
     return this.svc.pendingInward(branchId);
+  }
+
+  /** Partly and fully received POs with their receipt progress (dashboard) */
+  @Get('progress')
+  progress(@BranchId() branchId: string | null, @Query('limit') limit?: string) {
+    return this.svc.receiptProgress(branchId, Math.min(50, Math.max(1, Number(limit) || 10)));
   }
 
   @Get(':id')

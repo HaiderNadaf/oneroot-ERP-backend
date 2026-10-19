@@ -988,7 +988,11 @@ export class ProcurementService {
     }));
   }
 
-  async listGrns(q: Paging & { vendorId?: string; poId?: string; invoiced?: string }, branchId: string | null = null) {
+  /**
+   * Posted GRNs. sort=fefo puts first the GRNs whose accepted stock expires first (first expiry, first out);
+   * GRNs with no expiry dates follow, newest first. Otherwise newest first.
+   */
+  async listGrns(q: Paging & { vendorId?: string; poId?: string; invoiced?: string; sort?: string }, branchId: string | null = null) {
     const p = paging(q);
     const where: Prisma.GrnWhereInput = {
       branchId: branchId ?? undefined,
@@ -1001,9 +1005,31 @@ export class ProcurementService {
             ? { isNot: null }
             : undefined,
     };
-    const [grns, total] = await Promise.all([
+    // FEFO: order every matching GRN by the earliest expiry of its accepted stock, then take the page
+    let fefoIds: string[] | null = null;
+    if (q.sort === 'fefo') {
+      const all = await this.prisma.grn.findMany({ where, select: { id: true, receivedAt: true } });
+      const mins = await this.prisma.grnItem.groupBy({
+        by: ['grnId'],
+        where: { grnId: { in: all.map((g) => g.id) }, passedQty: { gt: 0 }, expiryDate: { not: null } },
+        _min: { expiryDate: true },
+      });
+      const expiry = new Map(mins.map((m) => [m.grnId, m._min.expiryDate?.getTime() ?? null]));
+      fefoIds = all
+        .sort((a, b) => {
+          const ea = expiry.get(a.id) ?? null;
+          const eb = expiry.get(b.id) ?? null;
+          if (ea !== null && eb !== null) return ea - eb || b.receivedAt.getTime() - a.receivedAt.getTime();
+          if (ea !== null) return -1;
+          if (eb !== null) return 1;
+          return b.receivedAt.getTime() - a.receivedAt.getTime();
+        })
+        .slice(p.skip, p.skip + p.take)
+        .map((g) => g.id);
+    }
+    const [found, total] = await Promise.all([
       this.prisma.grn.findMany({
-        where,
+        where: fefoIds ? { id: { in: fefoIds } } : where,
         include: {
           po: { select: { id: true, poNo: true } },
           vendor: { select: { id: true, name: true } },
@@ -1015,18 +1041,25 @@ export class ProcurementService {
               rejectedQty: true,
               damagedQty: true,
               expiredQty: true,
+              expiryDate: true,
             },
           },
           purchase: { select: { id: true, purchaseNo: true } },
         },
         orderBy: { receivedAt: 'desc' },
-        skip: p.skip,
-        take: p.take,
+        ...(fefoIds ? {} : { skip: p.skip, take: p.take }),
       }),
       this.prisma.grn.count({ where }),
     ]);
+    const grns = fefoIds ? fefoIds.map((id) => found.find((g) => g.id === id)!).filter(Boolean) : found;
     const rows = grns.map(({ items, ...g }) => ({
       ...g,
+      /** Earliest expiry of the stock accepted on this GRN (null when nothing passed or no dates) */
+      earliestExpiry:
+        items
+          .filter((i) => num(i.passedQty) > 0 && i.expiryDate)
+          .map((i) => i.expiryDate!)
+          .sort((a, b) => a.getTime() - b.getTime())[0] ?? null,
       passed: round3(items.reduce((s, i) => s + num(i.passedQty), 0)),
       rejected: round3(items.reduce((s, i) => s + num(i.rejectedQty), 0)),
       damaged: round3(items.reduce((s, i) => s + num(i.damagedQty), 0)),
@@ -1606,6 +1639,8 @@ export class ProcurementService {
       noteType?: string;
       purchaseId?: string;
       poId?: string;
+      /** Notes raised against this GRN or against the purchase invoice booked from it */
+      grnId?: string;
     },
     branchId: string | null = null,
   ) {
@@ -1619,6 +1654,7 @@ export class ProcurementService {
           : undefined,
       purchaseId: q.purchaseId || undefined,
       poId: q.poId || undefined,
+      ...(q.grnId ? { OR: [{ grnId: q.grnId }, { purchase: { grnId: q.grnId } }] } : {}),
     };
     const where = {
       ...base,

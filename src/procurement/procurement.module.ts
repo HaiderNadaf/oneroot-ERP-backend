@@ -1051,6 +1051,51 @@ export class ProcurementService {
     });
   }
 
+  /** Earlier PO lines for these products (any vendor), newest first, five per product; drafts, cancelled and rejected POs skipped */
+  async priceHistory(productIds: string[], excludePoId?: string) {
+    if (!productIds.length) return [];
+    const rows = await this.prisma.purchaseOrderItem.findMany({
+      where: {
+        productId: { in: productIds },
+        po: { deletedAt: null, status: { notIn: ['DRAFT', 'CANCELLED', 'REJECTED'] }, ...(excludePoId ? { id: { not: excludePoId } } : {}) },
+      },
+      orderBy: { po: { orderDate: 'desc' } },
+      take: Math.min(1000, productIds.length * 25),
+      select: {
+        productId: true,
+        quantity: true,
+        rate: true,
+        discountPct: true,
+        gstRate: true,
+        passedQty: true,
+        po: { select: { id: true, poNo: true, orderDate: true, status: true, vendor: { select: { id: true, name: true } } } },
+      },
+    });
+    const perProduct = new Map<string, number>();
+    return rows
+      .filter((r) => {
+        const count = (perProduct.get(r.productId) ?? 0) + 1;
+        perProduct.set(r.productId, count);
+        return count <= 5;
+      })
+      .map((r) => ({
+        productId: r.productId,
+        poId: r.po.id,
+        poNo: r.po.poNo,
+        orderDate: r.po.orderDate,
+        status: r.po.status,
+        vendorId: r.po.vendor.id,
+        vendorName: r.po.vendor.name,
+        quantity: r.quantity,
+        rate: r.rate,
+        discountPct: r.discountPct,
+        gstRate: r.gstRate,
+        /** Rate after the line discount, excl. GST */
+        netRate: round2(num(r.rate) * (1 - num(r.discountPct) / 100)),
+        receivedQty: r.passedQty,
+      }));
+  }
+
   async createGrn(poId: string, dto: CreateGrnDto, user: AuthUser, currentBranch: string | null = null) {
     const { grn, sms } = await this.prisma.$transaction(async (tx) => {
       const po = await tx.purchaseOrder.findUniqueOrThrow({
@@ -1099,6 +1144,8 @@ export class ProcurementService {
       }[] = [];
       const summary: string[] = [];
       const qty = { passed: 0, rejected: 0, damaged: 0, expired: 0 };
+      // A PO line may arrive split over several batches: count what earlier rows of this GRN already took
+      const usedByLine = new Map<string, number>();
       for (const r of rows) {
         const line = po.items.find((i) => i.id === r.poItemId);
         if (!line) throw new BadRequestException('Item is not on this PO');
@@ -1106,11 +1153,12 @@ export class ProcurementService {
         const total = round3(
           r.passedQty + r.rejectedQty + r.damagedQty + r.expiredQty,
         );
-        const pend = pendingQty(line);
+        const pend = round3(pendingQty(line) - (usedByLine.get(line.id) ?? 0));
         if (total > pend + 0.0005)
           throw new BadRequestException(
             `${p.name}: ${total} is more than the pending ${pend}`,
           );
+        usedByLine.set(line.id, round3((usedByLine.get(line.id) ?? 0) + total));
         const batchNo = r.batchNo?.trim();
         if (p.trackBatch && (r.passedQty > 0 || r.expiredQty > 0) && !batchNo) {
           throw new BadRequestException(`${p.name}: enter the batch number`);
@@ -1792,6 +1840,14 @@ export class PurchaseOrdersController {
   }
 
   /** Any signed-in user can see the queue; acting is limited to the assigned approver */
+  /** Earlier prices for the products on a PO being raised: ?productIds=a,b&excludePoId=<this PO> */
+  @Get('price-history')
+  @Can('purchases.view')
+  priceHistory(@Query('productIds') productIds = '', @Query('excludePoId') excludePoId?: string) {
+    const ids = productIds.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 50);
+    return this.svc.priceHistory(ids, excludePoId || undefined);
+  }
+
   @Get('approvals')
   approvals(@CurrentUser() user: AuthUser) {
     return this.svc.approvalQueue(user);

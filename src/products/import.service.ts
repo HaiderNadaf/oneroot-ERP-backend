@@ -187,6 +187,9 @@ export class ImportService {
           if (!catRaw) res.errors.push('Category and Sub-Category are required for a new product');
         }
         if (nums.salePrice === undefined) res.errors.push('Selling price is required for a new product');
+        for (const [key, label] of [['brand', 'Brand'], ['manufacturer', 'Manufacturer'], ['technicalName', 'Technical name']] as const) {
+          if (!str(r[key])) res.errors.push(`${label} is required for a new product`);
+        }
         // Same name + pack size as a product already saved, or as a new one earlier in the file
         const me = { name, packSize: str(r.packSize) };
         if (seenProducts.some((o) => sameProduct(o, me))) res.errors.push(`${name} ${me.packSize} appears twice in the file`);

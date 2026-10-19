@@ -48,6 +48,20 @@ class CreateVendorDto {
 
 class UpdateVendorDto extends PartialType(CreateVendorDto) {}
 
+/**
+ * Vendor names and addresses are stored in capitals ("abc tractors" → "ABC TRACTORS"), whatever case was typed.
+ * State is left as typed: GST compares it with the store's state to pick IGST or CGST + SGST.
+ */
+const UPPER_FIELDS = ['name', 'contactPerson', 'address', 'city', 'bankName', 'ifsc'] as const;
+function upperVendor<T extends Partial<Record<(typeof UPPER_FIELDS)[number], string>>>(dto: T): T {
+  const out: Record<string, unknown> = { ...dto };
+  for (const key of UPPER_FIELDS) {
+    const value = out[key];
+    if (typeof value === 'string') out[key] = value.trim().replace(/\s+/g, ' ').toUpperCase();
+  }
+  return out as T;
+}
+
 @Injectable()
 export class VendorsService {
   constructor(
@@ -112,6 +126,7 @@ export class VendorsService {
     // Normalise the GSTIN and take the state from its first two digits when none was chosen
     const gstin = normalizeGstin(dto.gstin);
     dto = { ...dto, gstin: gstin as string, state: dto.state || stateFromGstin(gstin) || dto.state };
+    dto = upperVendor(dto);
     return this.prisma.$transaction(async (tx) => {
       const vendor = await tx.vendor.create({ data: { ...dto, balance: dto.openingBalance ?? 0 } });
       await this.posting.postOpeningParty(tx, 'VENDOR', vendor.id, vendor.name, dto.openingBalance ?? 0, vendor.createdAt, user.id);
@@ -125,6 +140,7 @@ export class VendorsService {
     const gstin = normalizeGstin(dto.gstin);
     if (gstin === '') throw new BadRequestException('GSTIN is required');
     dto = { ...dto, gstin: gstin as string, state: dto.state || stateFromGstin(gstin) || dto.state };
+    dto = upperVendor(dto);
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.vendor.findUniqueOrThrow({ where: { id } });
       const delta = dto.openingBalance !== undefined ? round2(dto.openingBalance - num(existing.openingBalance)) : 0;

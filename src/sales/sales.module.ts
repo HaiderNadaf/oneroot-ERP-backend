@@ -312,7 +312,8 @@ export class SalesService {
           return { productId: i.productId, quantity: i.quantity, rate: i.rate ?? num(product.salePrice), manualPct: i.discountPct ?? 0 };
         }),
         products,
-        customerType: customer?.customerType ?? null,
+        // No customer chosen: the walk-in rule applies (if one is set up and active)
+        customerType: customer ? customer.customerType : await tx.customerType.findFirst({ where: { name: { equals: 'Walk-in Customer', mode: 'insensitive' }, isActive: true } }),
         date,
       });
 

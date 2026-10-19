@@ -28,6 +28,7 @@ import {
   Max,
   Min,
   ValidateNested,
+  IsNotEmpty,
 } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
@@ -63,9 +64,9 @@ class CreateProductDto {
   @IsOptional() @IsString() categoryId?: string;
   /** Sub-category the product is filed under (required for a new product) */
   @IsOptional() @IsString() subCategoryId?: string;
-  @IsOptional() @IsString() brand?: string;
-  @IsOptional() @IsString() manufacturer?: string;
-  @IsOptional() @IsString() technicalName?: string;
+  @IsString() @IsNotEmpty({ message: 'Brand is required' }) brand: string;
+  @IsString() @IsNotEmpty({ message: 'Manufacturer is required' }) manufacturer: string;
+  @IsString() @IsNotEmpty({ message: 'Technical name is required' }) technicalName: string;
   @IsOptional() @IsString() description?: string;
   @IsOptional() @IsString() hsnCode?: string;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) @Max(100) gstRate?: number;
@@ -89,6 +90,22 @@ class CreateProductDto {
 }
 
 class UpdateProductDto extends PartialType(CreateProductDto) {}
+
+/** Brand, manufacturer and technical name must be filled on every product (trimmed; blanks refused) */
+const MAKER_FIELDS = [
+  ['brand', 'Brand'],
+  ['manufacturer', 'Manufacturer'],
+  ['technicalName', 'Technical name'],
+] as const;
+function checkMakerFields(data: { brand?: string; manufacturer?: string; technicalName?: string }, creating: boolean) {
+  for (const [key, label] of MAKER_FIELDS) {
+    const value = data[key];
+    if (value === undefined && !creating) continue; // an edit that leaves the field alone
+    const trimmed = (value ?? '').trim();
+    if (!trimmed) throw new BadRequestException(`${label} is required`);
+    data[key] = trimmed;
+  }
+}
 
 /** Name / pack size compared ignoring case and spacing ("10 kg" = "10KG") */
 const normName = (v?: string | null) => (v ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -343,6 +360,7 @@ export class ProductsService {
 
   async create(dto: CreateProductDto, user: AuthUser, branchId: string | null = null) {
     const { openingStock, sku: _typed, ...data } = dto;
+    checkMakerFields(data, true);
     // The whole save is retried with the next number if a product saved at the same moment took this SKU
     const saved = await withUniqueSku(() => this.prisma.$transaction(async (tx) => {
       // Same name + pack size is the same product, whatever the unit: refuse it
@@ -412,6 +430,7 @@ export class ProductsService {
   async update(id: string, dto: UpdateProductDto, user: AuthUser) {
     // The SKU never changes once assigned, even if the product moves to another sub-category
     const { openingStock: _ignored, sku: _sku, attributes, location, ...data } = dto;
+    checkMakerFields(data, false);
     if (data.subCategoryId) {
       const sub = await this.prisma.subCategory.findUnique({ where: { id: data.subCategoryId }, include: { category: true } });
       if (!sub) throw new BadRequestException('Sub-category not found');

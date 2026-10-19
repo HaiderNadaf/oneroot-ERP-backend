@@ -1674,6 +1674,7 @@ export class ProcurementService {
           vendor: {
             select: {
               id: true,
+              code: true,
               name: true,
               gstin: true,
               state: true,

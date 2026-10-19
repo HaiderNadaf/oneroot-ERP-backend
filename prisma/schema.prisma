@@ -569,6 +569,8 @@ model StockMovement {
 
 model Vendor {
   id               String   @id @default(cuid())
+  /// VEN-0001…, given on create from the "VEN" sequence
+  code             String   @unique
   name             String
   contactPerson    String?
   phone            String?

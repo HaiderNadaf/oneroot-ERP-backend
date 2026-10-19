@@ -79,6 +79,7 @@ export class VendorsService {
     if (q.search) {
       where.OR = [
         { name: { contains: q.search, mode: 'insensitive' } },
+        { code: { contains: q.search, mode: 'insensitive' } },
         { phone: { contains: q.search } },
         { gstin: { contains: q.search, mode: 'insensitive' } },
       ];
@@ -128,9 +129,16 @@ export class VendorsService {
     dto = { ...dto, gstin: gstin as string, state: dto.state || stateFromGstin(gstin) || dto.state };
     dto = upperVendor(dto);
     return this.prisma.$transaction(async (tx) => {
-      const vendor = await tx.vendor.create({ data: { ...dto, balance: dto.openingBalance ?? 0 } });
+      // Next vendor code from one running counter (not reset each financial year)
+      const seq = await tx.sequence.upsert({
+        where: { key: 'VEN' },
+        create: { key: 'VEN', value: 1 },
+        update: { value: { increment: 1 } },
+      });
+      const code = `VEN-${String(seq.value).padStart(4, '0')}`;
+      const vendor = await tx.vendor.create({ data: { ...dto, code, balance: dto.openingBalance ?? 0 } });
       await this.posting.postOpeningParty(tx, 'VENDOR', vendor.id, vendor.name, dto.openingBalance ?? 0, vendor.createdAt, user.id);
-      await this.audit.log(user.id, 'CREATE', 'Vendor', vendor.id, { name: vendor.name }, tx);
+      await this.audit.log(user.id, 'CREATE', 'Vendor', vendor.id, { code, name: vendor.name }, tx);
       return vendor;
     }, TX_OPTIONS);
   }

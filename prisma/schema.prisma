@@ -840,6 +840,8 @@ model DebitNote {
   vendorRef      String?
   noteDate       DateTime        @default(now())
   reason         String
+  /// Where the returned goods are shipped, typed on the note (free text)
+  shipTo         String?
   status         DebitNoteStatus @default(DRAFT)
   /// true = goods leave our stock and the vendor balance drops when it is sent
   affectsStock   Boolean         @default(false)

@@ -8,6 +8,7 @@ import {
   Logger,
   Module,
   Param,
+  Patch,
   Post,
   Put,
   Query,
@@ -217,6 +218,11 @@ class CreateDebitNoteDto {
   @ValidateNested({ each: true })
   @Type(() => NoteItemDto)
   items: NoteItemDto[];
+}
+
+class ShipToDto {
+  /** Empty clears it */
+  @IsOptional() @IsString() @MaxLength(500) shipTo?: string;
 }
 
 class ApprovalStepDto {
@@ -1909,6 +1915,17 @@ export class ProcurementService {
     }, TX_OPTIONS);
   }
 
+  /** Shipping address on a note; editable until the note is cancelled */
+  async setShipTo(id: string, shipTo: string | undefined, user: AuthUser) {
+    const dn = await this.prisma.debitNote.findUniqueOrThrow({ where: { id } });
+    if (dn.status === 'CANCELLED')
+      throw new BadRequestException('This note is cancelled');
+    const text = shipTo?.trim() || null;
+    await this.prisma.debitNote.update({ where: { id }, data: { shipTo: text } });
+    await this.audit.log(user.id, 'UPDATE', 'DebitNote', id, { dnNo: dn.dnNo, shipTo: text });
+    return { shipTo: text };
+  }
+
   async cancelDebitNote(id: string, user: AuthUser) {
     const dn = await this.prisma.debitNote.findUniqueOrThrow({ where: { id } });
     if (dn.status !== 'DRAFT')
@@ -2079,6 +2096,12 @@ export class DebitNotesController {
   @Can('purchases.manage')
   cancel(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.svc.cancelDebitNote(id, user);
+  }
+
+  @Patch(':id/ship-to')
+  @Can('purchases.manage')
+  shipTo(@Param('id') id: string, @Body() dto: ShipToDto, @CurrentUser() user: AuthUser) {
+    return this.svc.setShipTo(id, dto.shipTo, user);
   }
 }
 

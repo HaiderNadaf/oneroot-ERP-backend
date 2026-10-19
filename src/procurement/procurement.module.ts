@@ -102,6 +102,8 @@ class SavePoDto {
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) transportCharges?: number;
   /** GST % on the transportation charges, 18 when not given */
   @IsOptional() @Type(() => Number) @IsIn(GST_RATES, { message: `GST must be one of ${GST_RATES.join(', ')}` }) transportGstRate?: number;
+  /** true = transportCharges already includes GST (the value before GST is worked out from it) */
+  @IsOptional() @IsBoolean() transportGstInclusive?: boolean;
   /** Other charges (loading, packing …), added to the PO total */
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) otherCharges?: number;
   /** GST % on the other charges, 18 when not given */
@@ -556,9 +558,13 @@ export class ProcurementService {
       const lines = poLines(dto.items, new Map(products.map((p) => [p.id, p])));
       const subtotal = round2(lines.reduce((s, l) => s + l.taxable, 0));
       const itemsTotal = round2(lines.reduce((s, l) => s + l.amount, 0));
-      const transportCharges = round2(dto.transportCharges ?? 0);
-      const otherCharges = round2(dto.otherCharges ?? 0);
       const transportGstRate = dto.transportGstRate ?? CHARGES_GST_RATE;
+      const transportGstInclusive = !!dto.transportGstInclusive;
+      // Stored before GST either way; an inclusive amount is brought back to its value before GST
+      const transportCharges = round2(
+        transportGstInclusive ? (dto.transportCharges ?? 0) / (1 + transportGstRate / 100) : (dto.transportCharges ?? 0),
+      );
+      const otherCharges = round2(dto.otherCharges ?? 0);
       const otherChargesGstRate = dto.otherChargesGstRate ?? CHARGES_GST_RATE;
       // Each item is taxed at its own rate (in its amount); each charge at its own rate. Subtotal stays the items' taxable value
       const taxAmount = round2(
@@ -582,6 +588,7 @@ export class ProcurementService {
         expiryDays: dto.expiryDays,
         transportCharges,
         transportGstRate,
+        transportGstInclusive,
         otherCharges,
         otherChargesGstRate,
         otherChargesNote: otherCharges ? dto.otherChargesNote?.trim() || null : null,

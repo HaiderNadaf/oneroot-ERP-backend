@@ -657,6 +657,8 @@ model PurchaseOrder {
   transportCharges    Decimal             @default(0) @db.Decimal(14, 2)
   /// GST % on the transportation charges (18 unless chosen otherwise)
   transportGstRate    Decimal             @default(18) @db.Decimal(5, 2)
+  /// The transport amount was entered including GST (transportCharges still holds the value before GST)
+  transportGstInclusive Boolean           @default(false)
   /// Any other charges (loading, packing …); otherChargesNote says what they are
   otherCharges        Decimal             @default(0) @db.Decimal(14, 2)
   /// GST % on the other charges (18 unless chosen otherwise)

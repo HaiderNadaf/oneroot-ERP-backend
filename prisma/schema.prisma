@@ -403,9 +403,30 @@ model Category {
   description   String?
   /// Tax type (GST / HSN defaults, govt fertiliser rules) for every product under this category
   type          ProductType?
+  /// The store's own tax type (name, GST %, HSN); `type` above is the built-in type it behaves like
+  taxTypeId     String?
+  taxType       TaxType?      @relation(fields: [taxTypeId], references: [id])
   subCategories SubCategory[]
   products      Product[]
   createdAt     DateTime      @default(now())
+}
+
+/// A tax type categories can use: its GST / HSN / unit defaults for new products, and the built-in type
+/// (seed, fertiliser, pesticide, equipment, other) it behaves like for licences and govt fertiliser rules.
+/// The five built-in ones are seeded; the store adds its own when one is missing.
+model TaxType {
+  id         String      @id @default(cuid())
+  name       String      @unique
+  baseType   ProductType
+  gstRate    Decimal     @default(18) @db.Decimal(5, 2)
+  hsnCode    String?
+  unit       String      @default("NOS")
+  trackBatch Boolean     @default(false)
+  /// One of the five built-in types (can't be deleted)
+  builtIn    Boolean     @default(false)
+  isActive   Boolean     @default(true)
+  createdAt  DateTime    @default(now())
+  categories Category[]
 }
 
 /// Sub-category of one Category, e.g. Farm Machinery → Tractors. Products are filed under a sub-category.

@@ -17,6 +17,59 @@ const logger = new Logger('Database');
 /** Waits between connection attempts: Neon waking from suspend usually answers within a few seconds */
 const CONNECT_BACKOFF_MS = [300, 1_000, 2_500, 5_000];
 
+/**
+ * A query with no answer for this long is sitting on a dead socket: Neon (or the network, or a laptop going to
+ * sleep) dropped the connection without a FIN, so the kernel keeps retransmitting for ~15 minutes and the query
+ * would hang the request — and the UI — that whole time. No real query here runs this long (transactions are capped at 30s).
+ */
+const QUERY_STALL_MS = 25_000;
+const WATCHED = Symbol('stallWatchdog');
+
+type WatchedClient = pg.PoolClient & {
+  [WATCHED]?: true;
+  connection?: { stream?: { destroy(err?: Error): void } };
+};
+
+/**
+ * Wraps a pooled client's query() so a query left unanswered for QUERY_STALL_MS destroys the socket.
+ * The query then fails with "Connection terminated unexpectedly", the pool throws the client away, and reads are
+ * retried on a fresh connection (RetryReadsOnDbBlip) — a few seconds' delay instead of a request that never ends.
+ */
+function watchForStalls(client: pg.PoolClient) {
+  const c = client as WatchedClient;
+  if (c[WATCHED]) return client;
+  c[WATCHED] = true;
+  const query = c.query.bind(c) as (...args: unknown[]) => unknown;
+  (c as { query: unknown }).query = (...args: unknown[]) => {
+    const timer = setTimeout(() => {
+      logger.warn(`No answer from the database in ${QUERY_STALL_MS / 1000}s — dropping the dead connection`);
+      c.connection?.stream?.destroy(new Error('Database connection stalled'));
+    }, QUERY_STALL_MS);
+    timer.unref();
+    const done = () => clearTimeout(timer);
+    // Callback style (pg's own pool.query) or promise style (Prisma); anything else is not watched
+    const last = args.length - 1;
+    if (typeof args[last] === 'function') {
+      const cb = args[last] as (...a: unknown[]) => void;
+      args[last] = (...a: unknown[]) => {
+        done();
+        cb(...a);
+      };
+    }
+    let result: unknown;
+    try {
+      result = query(...args);
+    } catch (e) {
+      done();
+      throw e;
+    }
+    if (result instanceof Promise) result.then(done, done);
+    else if (typeof args[last] !== 'function') done();
+    return result;
+  };
+  return client;
+}
+
 // Same shape as pg's own connect callback
 type ConnectCallback = (err: Error | undefined, client: pg.PoolClient | undefined, done: (release?: Error | boolean) => void) => void;
 
@@ -29,7 +82,7 @@ class RetryingPool extends pg.Pool {
   private async connectWithRetry(): Promise<pg.PoolClient> {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await super.connect();
+        return watchForStalls(await super.connect());
       } catch (e) {
         if (attempt >= CONNECT_BACKOFF_MS.length || !isConnectError(e)) throw e;
         logger.warn(`Could not reach the database (${(e as Error).message || (e as { code?: string }).code}); retry ${attempt + 1} of ${CONNECT_BACKOFF_MS.length}`);

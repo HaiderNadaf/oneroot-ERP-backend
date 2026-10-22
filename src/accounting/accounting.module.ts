@@ -602,22 +602,22 @@ export class AccountingController {
   }
 
   @Post('accounts')
-  @Can('accounts.manage')
-  @Can('accounts.manage')
+  @Can('accounts.create')
+  @Can('accounts.create')
   createAccount(@Body() dto: CreateAccountDto, @CurrentUser() user: AuthUser) {
     return this.svc.createAccount(dto, user);
   }
 
   @Patch('accounts/:id')
-  @Can('accounts.manage')
-  @Can('accounts.manage')
+  @Can('accounts.edit')
+  @Can('accounts.edit')
   updateAccount(@Param('id') id: string, @Body() dto: UpdateAccountDto, @CurrentUser() user: AuthUser) {
     return this.svc.updateAccount(id, dto, user);
   }
 
   @Delete('accounts/:id')
-  @Can('accounts.manage')
-  @Can('accounts.manage')
+  @Can('accounts.delete')
+  @Can('accounts.delete')
   deleteAccount(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.svc.deleteAccount(id, user);
   }
@@ -658,15 +658,15 @@ export class AccountingController {
   }
 
   @Post('entries')
-  @Can('accounts.manage')
-  @Can('accounts.manage')
+  @Can('accounts.create')
+  @Can('accounts.create')
   createManual(@Body() dto: ManualEntryDto, @CurrentUser() user: AuthUser) {
     return this.svc.createManual(dto, user, null);
   }
 
   @Delete('entries/:id')
-  @Can('accounts.manage')
-  @Can('accounts.manage')
+  @Can('accounts.delete')
+  @Can('accounts.delete')
   deleteManual(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.svc.deleteManual(id, user);
   }

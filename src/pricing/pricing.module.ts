@@ -288,19 +288,19 @@ export class SchemesController {
   }
 
   @Post()
-  @Can('admin.schemes')
+  @Can('schemes.create')
   create(@Body() dto: SchemeDto, @CurrentUser() user: AuthUser) {
     return this.pricing.createScheme(dto, user);
   }
 
   @Patch(':id')
-  @Can('admin.schemes')
+  @Can('schemes.edit')
   update(@Param('id') id: string, @Body() dto: SchemeDto, @CurrentUser() user: AuthUser) {
     return this.pricing.updateScheme(id, dto, user);
   }
 
   @Delete(':id')
-  @Can('admin.schemes')
+  @Can('schemes.delete')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.pricing.deleteScheme(id, user);
   }
@@ -316,19 +316,19 @@ export class CustomerTypesController {
   }
 
   @Post()
-  @Can('admin.schemes')
+  @Can('schemes.create')
   create(@Body() dto: CustomerTypeDto, @CurrentUser() user: AuthUser) {
     return this.pricing.createType(dto, user);
   }
 
   @Patch(':id')
-  @Can('admin.schemes')
+  @Can('schemes.edit')
   update(@Param('id') id: string, @Body() dto: Partial<CustomerTypeDto>, @CurrentUser() user: AuthUser) {
     return this.pricing.updateType(id, dto, user);
   }
 
   @Delete(':id')
-  @Can('admin.schemes')
+  @Can('schemes.delete')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.pricing.deleteType(id, user);
   }

@@ -141,7 +141,7 @@ export class ProductSerialsController {
   }
 
   @Post()
-  @Can('products.manage')
+  @Can('products.edit')
   async register(@Param('id') id: string, @Body() dto: RegisterSerialsDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     const r = await this.serials.register(this.prisma, { productId: id, branchId: needBranch(branchId), batchId: dto.batchId, serialNos: dto.serialNos, note: dto.note, refType: 'MANUAL' });
     await this.audit.log(user.id, 'CREATE', 'SerialNumber', id, { added: r.added, skipped: r.skipped.length });
@@ -154,7 +154,7 @@ export class SerialsController {
   constructor(private readonly serials: SerialsService) {}
 
   @Delete(':id')
-  @Can('products.manage')
+  @Can('products.edit')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.serials.remove(id, user);
   }

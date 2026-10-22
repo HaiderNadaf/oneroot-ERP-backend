@@ -75,7 +75,7 @@ export class SettingsController {
   }
 
   @Put()
-  @Can('admin.settings')
+  @Can('settings.edit')
   async update(@Body() dto: UpdateSettingsDto, @CurrentUser() user: AuthUser) {
     const result = await this.settings.update(dto);
     await this.audit.log(user.id, 'UPDATE', 'StoreSettings', '1', { ...dto });

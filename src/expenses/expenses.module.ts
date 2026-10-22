@@ -73,21 +73,24 @@ export class ExpensesService {
 }
 
 @Controller('expenses')
-@Can('expenses')
+@Can('expenses.view')
 export class ExpensesController {
   constructor(private readonly expenses: ExpensesService) {}
 
   @Get()
+  @Can('expenses.view')
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.expenses.list(q, branchId);
   }
 
   @Post()
+  @Can('expenses.create')
   create(@Body() dto: CreateExpenseDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.expenses.create(dto, user, branchId);
   }
 
   @Delete(':id')
+  @Can('expenses.delete')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.expenses.remove(id, user);
   }

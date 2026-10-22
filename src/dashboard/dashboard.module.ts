@@ -81,7 +81,7 @@ export class DashboardService implements OnApplicationBootstrap {
   private visibleTo(user: AuthUser, data: Awaited<ReturnType<DashboardService['compute']>>) {
     const may = (...keys: Permission[]) => hasPerm(user, ...keys);
     const finance = may('reports.view');
-    const sales = may('sales.bill', 'reports.view');
+    const sales = may('sales.view', 'reports.view');
     const collected = may('payments.view', 'reports.view');
     const dues = may('customers.view', 'reports.view');
     const stock = may('inventory.view');
@@ -294,7 +294,7 @@ export class DashboardService implements OnApplicationBootstrap {
       this.prisma.purchaseOrder.findMany({
         where: { status: 'PENDING_APPROVAL', branchId: B, deletedAt: null },
         include: { vendor: { select: { name: true } } },
-        orderBy: { orderDate: 'asc' },
+        orderBy: { createdAt: 'desc' },
       }),
       this.prisma.purchaseOrder.count({ where: { status: { in: ['APPROVED', 'PARTIALLY_RECEIVED'] }, branchId: B, deletedAt: null } }),
       this.prisma.grn.count({ where: { purchase: { is: null }, branchId: B } }),
@@ -497,7 +497,7 @@ export class DashboardService implements OnApplicationBootstrap {
             take: 5,
           })
         : skip,
-      may('sales.bill')
+      may('sales.view')
         ? this.prisma.sale.findMany({
             where: { OR: [{ invoiceNo: ci }, { customerName: ci }, { customerPhone: { contains: term } }] },
             select: { id: true, invoiceNo: true, customerName: true, customerPhone: true, totalAmount: true, saleDate: true, status: true },
@@ -505,7 +505,7 @@ export class DashboardService implements OnApplicationBootstrap {
             take: 5,
           })
         : skip,
-      may('purchases.view')
+      may('invoices.view')
         ? this.prisma.purchase.findMany({
             where: { OR: [{ purchaseNo: ci }, { vendorInvoiceNo: ci }, { vendor: { name: ci } }] },
             select: { id: true, purchaseNo: true, vendorInvoiceNo: true, totalAmount: true, purchaseDate: true, vendor: { select: { name: true } } },
@@ -517,7 +517,7 @@ export class DashboardService implements OnApplicationBootstrap {
         ? this.prisma.purchaseOrder.findMany({
             where: { OR: [{ poNo: ci }, { vendor: { name: ci } }], deletedAt: null },
             select: { id: true, poNo: true, status: true, totalAmount: true, orderDate: true, vendor: { select: { name: true } } },
-            orderBy: { orderDate: 'desc' },
+            orderBy: { createdAt: 'desc' },
             take: 5,
           })
         : skip,

@@ -15,7 +15,7 @@ const PG_CODES = new Set(['57P01', '57P02', '57P03', '53300', '08000', '08001', 
 const PRISMA_CODES = new Set(['P1001', 'P1002', 'P1008', 'P1017', 'P2024', 'P2037']);
 
 const MESSAGE =
-  /timeout exceeded when trying to connect|connection terminated|connection (?:was )?closed|server has closed the connection|can't reach database|could not connect|socket hang up|unable to start a transaction in the given time|too many connections|terminating connection|Connection terminated unexpectedly|ETIMEDOUT|ECONNRESET|ECONNREFUSED/i;
+  /timeout exceeded when trying to connect|connection terminated|connection (?:was )?closed|server has closed the connection|can't reach database|could not connect|socket hang up|unable to start a transaction in the given time|too many connections|terminating connection|Connection terminated unexpectedly|connection stalled|ETIMEDOUT|ECONNRESET|ECONNREFUSED/i;
 
 function codesOf(e: unknown, depth = 0): string[] {
   if (!e || typeof e !== 'object' || depth > 4) return [];

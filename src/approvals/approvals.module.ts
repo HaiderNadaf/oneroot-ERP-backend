@@ -339,7 +339,7 @@ export class RolesController {
   }
 
   @Put('limits/:role')
-  @Can('admin.roles')
+  @Can('roles.edit')
   update(@Param('role') role: string, @Body() dto: LimitDto, @CurrentUser() user: AuthUser) {
     if (!(role in DEFAULT_LIMITS)) throw new BadRequestException('Unknown role');
     return this.approvals.updateLimit(role as Role, dto, user);

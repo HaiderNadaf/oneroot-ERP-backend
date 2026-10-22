@@ -127,7 +127,7 @@ export class NotificationsService implements OnApplicationBootstrap, OnModuleDes
       ]);
 
       if (lowStock.length) {
-        await this.toPermitted(['purchases.manage'], {
+        await this.toPermitted(['po.create'], {
           type: 'WARNING',
           title: `${lowStock.length} product${lowStock.length > 1 ? 's are' : ' is'} at or below reorder level`,
           message: lowStock

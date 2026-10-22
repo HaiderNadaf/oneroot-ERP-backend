@@ -273,13 +273,13 @@ export class VendorsController {
   }
 
   @Post()
-  @Can('vendors.manage')
+  @Can('vendors.create')
   create(@Body() dto: CreateVendorDto, @CurrentUser() user: AuthUser) {
     return this.vendors.create(dto, user);
   }
 
   @Patch(':id')
-  @Can('vendors.manage')
+  @Can('vendors.edit')
   update(@Param('id') id: string, @Body() dto: UpdateVendorDto, @CurrentUser() user: AuthUser) {
     return this.vendors.update(id, dto, user);
   }

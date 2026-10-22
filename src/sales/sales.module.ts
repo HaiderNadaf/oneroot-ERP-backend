@@ -682,7 +682,7 @@ export class SalesService {
       SELECT id, name, unit, stock FROM "Product"
       WHERE id = ANY(${productIds}) AND "reorderLevel" > 0 AND stock <= "reorderLevel"`;
     for (const p of low) {
-      await this.notifications.toPermitted(['purchases.manage'], {
+      await this.notifications.toPermitted(['po.create'], {
         type: 'WARNING',
         title: `Low stock: ${p.name}`,
         message: `Only ${Number(p.stock)} ${p.unit} left — reorder soon`,
@@ -932,12 +932,13 @@ export class SalesController {
   constructor(private readonly sales: SalesService) {}
 
   @Get()
+  @Can('sales.view')
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.sales.list(q, branchId);
   }
 
   @Get('returns')
-  @Can('sales.returns')
+  @Can('returns.view')
   returns(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.sales.listReturns(q, branchId);
   }
@@ -963,6 +964,7 @@ export class SalesController {
   }
 
   @Get(':id')
+  @Can('sales.view', 'sales.bill', 'sales.returns')
   get(@Param('id') id: string) {
     return this.sales.get(id);
   }

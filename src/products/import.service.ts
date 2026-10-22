@@ -278,7 +278,7 @@ export class ImportController {
   constructor(private readonly importer: ImportService) {}
 
   @Post()
-  @Can('products.manage')
+  @Can('products.create')
   run(@Body() dto: ImportDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.importer.run(dto, user, branchId);
   }

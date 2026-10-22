@@ -261,13 +261,13 @@ export class CustomersController {
   }
 
   @Post()
-  @Can('customers.manage')
+  @Can('customers.create')
   create(@Body() dto: CreateCustomerDto, @CurrentUser() user: AuthUser) {
     return this.customers.create(dto, user);
   }
 
   @Patch(':id')
-  @Can('customers.manage')
+  @Can('customers.edit')
   update(@Param('id') id: string, @Body() dto: UpdateCustomerDto, @CurrentUser() user: AuthUser) {
     return this.customers.update(id, dto, user);
   }

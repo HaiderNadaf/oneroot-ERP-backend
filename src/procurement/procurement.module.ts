@@ -50,6 +50,7 @@ import {
   round3,
   startOfDay,
   type Paging,
+  dateRange,
 } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import {
@@ -259,6 +260,38 @@ const EDITABLE: PurchaseOrderStatus[] = [
 ];
 const RECEIVABLE: PurchaseOrderStatus[] = ['APPROVED', 'PARTIALLY_RECEIVED'];
 
+/** Statuses shown for a PO: the stored one, plus where it stands in a multi-level approval */
+type PoDisplayStatus = PurchaseOrderStatus | 'PARTIALLY_APPROVED' | 'PARTIALLY_REJECTED';
+
+/**
+ * Pending with at least one level already approved → PARTIALLY_APPROVED;
+ * rejected at a later level after earlier levels approved → PARTIALLY_REJECTED (level = index of the step that acted)
+ */
+function poDisplayStatus(po: { status: PurchaseOrderStatus; level: number }): PoDisplayStatus {
+  if (po.level > 0 && po.status === 'PENDING_APPROVAL') return 'PARTIALLY_APPROVED';
+  if (po.level > 0 && po.status === 'REJECTED') return 'PARTIALLY_REJECTED';
+  return po.status;
+}
+
+/** List filter for a display status: the partial ones split their stored status by approval level */
+function poStatusWhere(status: string | undefined): Prisma.PurchaseOrderWhereInput {
+  switch (status) {
+    case undefined:
+    case '':
+      return {};
+    case 'PENDING_APPROVAL':
+      return { status: 'PENDING_APPROVAL', level: 0 };
+    case 'PARTIALLY_APPROVED':
+      return { status: 'PENDING_APPROVAL', level: { gt: 0 } };
+    case 'REJECTED':
+      return { status: 'REJECTED', level: 0 };
+    case 'PARTIALLY_REJECTED':
+      return { status: 'REJECTED', level: { gt: 0 } };
+    default:
+      return { status: status as PurchaseOrderStatus };
+  }
+}
+
 type PoItemCounts = {
   quantity: unknown;
   passedQty: unknown;
@@ -421,22 +454,59 @@ export class ProcurementService {
 
   // ───── Purchase orders ─────
 
-  async listPos(q: Paging & { status?: string; vendorId?: string }, branchId: string | null = null) {
+  /** Vendors, users and products that appear on a list's documents, for its Vendor, Created By and Product filters */
+  async listFilters(kind: 'po' | 'grn' | 'note', branchId: string | null = null) {
+    const branch = { branchId: branchId ?? undefined };
+    const pairs: { vendorId: string | null; userId: string | null }[] =
+      kind === 'po'
+        ? (
+            await this.prisma.purchaseOrder.groupBy({ by: ['vendorId', 'createdById'], where: { ...branch, deletedAt: null } })
+          ).map((r) => ({ vendorId: r.vendorId, userId: r.createdById }))
+        : kind === 'grn'
+          ? (await this.prisma.grn.groupBy({ by: ['vendorId', 'receivedById'], where: branch })).map((r) => ({
+              vendorId: r.vendorId,
+              userId: r.receivedById,
+            }))
+          : (await this.prisma.debitNote.groupBy({ by: ['vendorId', 'userId'], where: branch })).map((r) => ({
+              vendorId: r.vendorId,
+              userId: r.userId,
+            }));
+    const distinctProduct = { distinct: 'productId', select: { productId: true } } as const;
+    const productRows: { productId: string | null }[] =
+      kind === 'po'
+        ? await this.prisma.purchaseOrderItem.findMany({ ...distinctProduct, where: { po: { ...branch, deletedAt: null } } })
+        : kind === 'grn'
+          ? await this.prisma.grnItem.findMany({ ...distinctProduct, where: { grn: branch } })
+          : await this.prisma.debitNoteItem.findMany({ ...distinctProduct, where: { debitNote: branch } });
+    const ids = (k: 'vendorId' | 'userId') => [...new Set(pairs.map((r) => r[k]).filter((x): x is string => !!x))];
+    const productIds = productRows.map((r) => r.productId).filter((x): x is string => !!x);
+    const [vendors, users, products] = await Promise.all([
+      this.prisma.vendor.findMany({ where: { id: { in: ids('vendorId') } }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      this.prisma.user.findMany({ where: { id: { in: ids('userId') } }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      this.prisma.product.findMany({ where: { id: { in: productIds } }, select: { id: true, name: true, sku: true }, orderBy: { name: 'asc' } }),
+    ]);
+    return { vendors, users, products };
+  }
+
+  async listPos(
+    q: Paging & { status?: string; vendorId?: string; userId?: string; productId?: string; from?: string; to?: string },
+    branchId: string | null = null,
+  ) {
     const p = paging(q);
     const where: Prisma.PurchaseOrderWhereInput = {
       branchId: branchId ?? undefined,
       vendorId: q.vendorId || undefined,
+      createdById: q.userId || undefined,
+      items: q.productId ? { some: { productId: q.productId } } : undefined,
+      orderDate: dateRange(q.from, q.to),
       deletedAt: null,
     };
-    const listWhere = {
-      ...where,
-      status: (q.status as PurchaseOrderStatus) || undefined,
-    };
+    const listWhere = { ...where, ...poStatusWhere(q.status) };
     const [pos, counts, total, value] = await Promise.all([
       this.prisma.purchaseOrder.findMany({
         where: listWhere,
         include: {
-          vendor: { select: { id: true, name: true, state: true } },
+          vendor: { select: { id: true, code: true, name: true, state: true } },
           branch: { select: { id: true, code: true, name: true } },
           items: {
             select: {
@@ -449,12 +519,12 @@ export class ProcurementService {
           },
           createdBy: { select: { name: true } },
         },
-        orderBy: { orderDate: 'desc' },
+        orderBy: { createdAt: 'desc' },
         skip: p.skip,
         take: p.take,
       }),
       this.prisma.purchaseOrder.groupBy({
-        by: ['status'],
+        by: ['status', 'level'],
         where,
         _count: true,
       }),
@@ -467,6 +537,7 @@ export class ProcurementService {
     const items = await Promise.all(
       pos.map(async ({ items, ...po }) => ({
         ...po,
+        displayStatus: poDisplayStatus(po),
         itemCount: items.length,
         receivedPct: receivedPct(items),
         canEdit: EDITABLE.includes(po.status) && receivedPct(items) === 0,
@@ -476,7 +547,12 @@ export class ProcurementService {
     return {
       ...paged(items, total, p),
       totalValue: value._sum.totalAmount ?? 0,
-      counts: Object.fromEntries(counts.map((c) => [c.status, c._count])),
+      // Per display status, so Partially Approved / Rejected get their own tabs
+      counts: counts.reduce<Partial<Record<PoDisplayStatus, number>>>((acc, c) => {
+        const k = poDisplayStatus(c);
+        acc[k] = (acc[k] ?? 0) + c._count;
+        return acc;
+      }, {}),
     };
   }
 
@@ -511,8 +587,11 @@ export class ProcurementService {
             grnNo: true,
             receivedAt: true,
             receivedBy: { select: { name: true } },
+            items: {
+              select: { poItemId: true, passedQty: true, batchNo: true, expiryDate: true },
+            },
           },
-          orderBy: { receivedAt: 'asc' },
+          orderBy: { createdAt: 'desc' },
         },
         purchases: { select: { id: true, purchaseNo: true, status: true } },
         debitNotes: {
@@ -530,7 +609,7 @@ export class ProcurementService {
             affectsBalance: true,
             purchase: { select: { id: true, purchaseNo: true } },
           },
-          orderBy: { noteDate: 'asc' },
+          orderBy: { createdAt: 'desc' },
         },
       },
     });
@@ -543,6 +622,7 @@ export class ProcurementService {
       po.status === 'PENDING_APPROVAL' ? chain[po.level] : undefined;
     return {
       ...po,
+      displayStatus: poDisplayStatus(po),
       chain,
       waitingFor: current ?? null,
       canAct: this.approvals.canAct(user, current),
@@ -913,7 +993,7 @@ export class ProcurementService {
           _count: { select: { items: true } },
           history: { orderBy: { at: 'desc' }, take: 1 },
         },
-        orderBy: { orderDate: 'asc' },
+        orderBy: { createdAt: 'desc' },
       }),
       this.prisma.poHistory.findMany({
         where: {
@@ -983,12 +1063,13 @@ export class ProcurementService {
         branch: { select: { id: true, code: true, name: true } },
         items: { include: { product: { select: { name: true } } } },
       },
-      orderBy: { expectedDate: { sort: 'asc', nulls: 'last' } },
+      orderBy: { createdAt: 'desc' },
     });
     const today = startOfDay(new Date());
     return pos.map(({ items, ...po }) => ({
       ...po,
       products: items.map((i) => i.product.name),
+      poQty: round3(items.reduce((s, i) => s + num(i.quantity), 0)),
       receivedPct: receivedPct(items),
       late: !!po.expectedDate && po.expectedDate < today,
     }));
@@ -998,11 +1079,17 @@ export class ProcurementService {
    * Posted GRNs. sort=fefo puts first the GRNs whose accepted stock expires first (first expiry, first out);
    * GRNs with no expiry dates follow, newest first. Otherwise newest first.
    */
-  async listGrns(q: Paging & { vendorId?: string; poId?: string; invoiced?: string; sort?: string }, branchId: string | null = null) {
+  async listGrns(
+    q: Paging & { vendorId?: string; poId?: string; invoiced?: string; sort?: string; userId?: string; productId?: string; from?: string; to?: string },
+    branchId: string | null = null,
+  ) {
     const p = paging(q);
     const where: Prisma.GrnWhereInput = {
       branchId: branchId ?? undefined,
       vendorId: q.vendorId || undefined,
+      receivedById: q.userId || undefined,
+      items: q.productId ? { some: { productId: q.productId } } : undefined,
+      receivedAt: dateRange(q.from, q.to),
       poId: q.poId || undefined,
       purchase:
         q.invoiced === 'false'
@@ -1014,7 +1101,7 @@ export class ProcurementService {
     // FEFO: order every matching GRN by the earliest expiry of its accepted stock, then take the page
     let fefoIds: string[] | null = null;
     if (q.sort === 'fefo') {
-      const all = await this.prisma.grn.findMany({ where, select: { id: true, receivedAt: true } });
+      const all = await this.prisma.grn.findMany({ where, select: { id: true, createdAt: true } });
       const mins = await this.prisma.grnItem.groupBy({
         by: ['grnId'],
         where: { grnId: { in: all.map((g) => g.id) }, passedQty: { gt: 0 }, expiryDate: { not: null } },
@@ -1025,10 +1112,10 @@ export class ProcurementService {
         .sort((a, b) => {
           const ea = expiry.get(a.id) ?? null;
           const eb = expiry.get(b.id) ?? null;
-          if (ea !== null && eb !== null) return ea - eb || b.receivedAt.getTime() - a.receivedAt.getTime();
+          if (ea !== null && eb !== null) return ea - eb || b.createdAt.getTime() - a.createdAt.getTime();
           if (ea !== null) return -1;
           if (eb !== null) return 1;
-          return b.receivedAt.getTime() - a.receivedAt.getTime();
+          return b.createdAt.getTime() - a.createdAt.getTime();
         })
         .slice(p.skip, p.skip + p.take)
         .map((g) => g.id);
@@ -1037,7 +1124,7 @@ export class ProcurementService {
       this.prisma.grn.findMany({
         where: fefoIds ? { id: { in: fefoIds } } : where,
         include: {
-          po: { select: { id: true, poNo: true } },
+          po: { select: { id: true, poNo: true, items: { select: { quantity: true } } } },
           vendor: { select: { id: true, name: true } },
           branch: { select: { id: true, code: true, name: true } },
           receivedBy: { select: { name: true } },
@@ -1052,14 +1139,17 @@ export class ProcurementService {
           },
           purchase: { select: { id: true, purchaseNo: true } },
         },
-        orderBy: { receivedAt: 'desc' },
+        orderBy: { createdAt: 'desc' },
         ...(fefoIds ? {} : { skip: p.skip, take: p.take }),
       }),
       this.prisma.grn.count({ where }),
     ]);
     const grns = fefoIds ? fefoIds.map((id) => found.find((g) => g.id === id)!).filter(Boolean) : found;
-    const rows = grns.map(({ items, ...g }) => ({
+    const rows = grns.map(({ items, po: { items: poItems, ...po }, ...g }) => ({
       ...g,
+      po,
+      /** Total quantity ordered on the PO */
+      poQty: round3(poItems.reduce((s, i) => s + num(i.quantity), 0)),
       /** Earliest expiry of the stock accepted on this GRN (null when nothing passed or no dates) */
       earliestExpiry:
         items
@@ -1257,11 +1347,15 @@ export class ProcurementService {
           );
         usedByLine.set(line.id, round3((usedByLine.get(line.id) ?? 0) + total));
         const batchNo = r.batchNo?.trim();
-        if (p.trackBatch && (r.passedQty > 0 || r.expiredQty > 0) && !batchNo) {
+        // Every batch taken into stock carries its own batch number, Mfg date and expiry date
+        if ((r.passedQty > 0 || (p.trackBatch && r.expiredQty > 0)) && !batchNo) {
           throw new BadRequestException(`${p.name}: enter the batch number`);
         }
+        if (r.passedQty > 0 && !r.mfgDate) {
+          throw new BadRequestException(`${p.name}: enter the Mfg date of batch ${batchNo}`);
+        }
         const expiry = r.expiryDate ? parseDay(r.expiryDate) : null;
-        if (p.trackBatch && r.passedQty > 0 && (!expiry || expiry <= today)) {
+        if (r.passedQty > 0 && (!expiry || expiry <= today)) {
           throw new BadRequestException(
             `${p.name}: passed stock needs a future expiry date — count expired goods under Expired`,
           );
@@ -1337,6 +1431,50 @@ export class ProcurementService {
       // Accepted stock is on the books at the PO rate until the vendor's bill is booked
       await this.posting.postGrn(tx, await tx.grn.findUniqueOrThrow({ where: { id: grn.id }, include: { items: true } }), po.vendor.name);
 
+      // Short supply: what each open PO line was still due minus what this GRN accounted for
+      const short = po.items
+        .map((line) => ({ line, quantity: round3(pendingQty(line) - (usedByLine.get(line.id) ?? 0)) }))
+        .filter((s) => s.quantity > 0);
+      // An earlier GRN's short-supply note is out of date now that more has arrived; this GRN's note replaces it
+      await tx.debitNote.updateMany({
+        where: { poId, reasonType: 'SHORT_SUPPLY', status: 'DRAFT', affectsStock: false, affectsBalance: false },
+        data: { status: 'CANCELLED' },
+      });
+      let shortNoteNo: string | null = null;
+      if (short.length) {
+        const lines = short.map(({ line, quantity }) => {
+          const sub = round2(quantity * num(line.rate));
+          return { productId: line.productId, quantity, rate: num(line.rate), gstRate: num(line.gstRate), amount: round2(sub * (1 + num(line.gstRate) / 100)), sub };
+        });
+        const subtotal = round2(lines.reduce((s, l) => s + l.sub, 0));
+        const totalAmount = round2(lines.reduce((s, l) => s + l.amount, 0));
+        // A record for the vendor: the bill only covers what passed, so the shortfall never reached the payable
+        const dn = await tx.debitNote.create({
+          data: {
+            dnNo: await nextDocNo(tx, 'DN'),
+            vendorId: po.vendorId,
+            grnId: grn.id,
+            poId,
+            reasonType: 'SHORT_SUPPLY',
+            branchId,
+            reason: `Short supply on ${grnNo}: ${short.map(({ line, quantity }) => `${line.product.name} ${quantity} ${line.product.unit} short`).join(', ')}`,
+            affectsStock: false,
+            affectsBalance: false,
+            subtotal,
+            taxAmount: round2(totalAmount - subtotal),
+            totalAmount,
+            userId: user.id,
+            items: { create: lines.map(({ sub: _s, ...l }) => l) },
+          },
+        });
+        shortNoteNo = dn.dnNo;
+        await this.notifications.toPermitted(
+          ['notes.create'],
+          { type: 'INFO', title: `${grnNo}: short supply noted on debit note ${dn.dnNo}`, module: 'Goods Inward', link: '/debit-notes' },
+          tx,
+        );
+      }
+
       const items = await tx.purchaseOrderItem.findMany({ where: { poId } });
       const status = items.every((i) => pendingQty(i) <= 0)
         ? 'RECEIVED'
@@ -1381,7 +1519,7 @@ export class ProcurementService {
         });
         dnNo = dn.dnNo;
         await this.notifications.toPermitted(
-          ['purchases.manage'],
+          ['notes.create'],
           {
             type: 'INFO',
             title: `${grnNo}: rejected goods moved to debit note ${dn.dnNo}`,
@@ -1392,7 +1530,7 @@ export class ProcurementService {
         );
       }
       await this.notifications.toPermitted(
-        ['purchases.manage'],
+        ['invoices.create'],
         {
           type: 'SUCCESS',
           title: `${grnNo} posted`,
@@ -1428,7 +1566,7 @@ export class ProcurementService {
       //   '. Thank you.';
       // Twilio trial accounts can only send predefined templates; the body is the template name
       const text = 'sms_delivery_updates';
-      return { grn, sms: { phone: po.vendor.phone, text } };
+      return { grn: { ...grn, shortNoteNo }, sms: { phone: po.vendor.phone, text } };
     }, TX_OPTIONS);
     // Sent after commit; never throws, so an SMS failure can't undo the GRN
     this.sms.notify(sms.phone, sms.text, `GRN ${grn.grnNo} SMS`);
@@ -1614,7 +1752,7 @@ export class ProcurementService {
       }
       if (rateMismatch) {
         await this.notifications.toPermitted(
-          ['purchases.manage'],
+          ['invoices.create'],
           {
             type: 'WARNING',
             title: `${purchaseNo}: invoice rate differs from ${grn.po.poNo}`,
@@ -1648,6 +1786,10 @@ export class ProcurementService {
       poId?: string;
       /** Notes raised against this GRN or against the purchase invoice booked from it */
       grnId?: string;
+      userId?: string;
+      productId?: string;
+      from?: string;
+      to?: string;
     },
     branchId: string | null = null,
   ) {
@@ -1661,6 +1803,9 @@ export class ProcurementService {
           : undefined,
       purchaseId: q.purchaseId || undefined,
       poId: q.poId || undefined,
+      userId: q.userId || undefined,
+      items: q.productId ? { some: { productId: q.productId } } : undefined,
+      noteDate: dateRange(q.from, q.to),
       ...(q.grnId ? { OR: [{ grnId: q.grnId }, { purchase: { grnId: q.grnId } }] } : {}),
     };
     const where = {
@@ -1693,7 +1838,7 @@ export class ProcurementService {
             },
           },
         },
-        orderBy: { noteDate: 'desc' },
+        orderBy: { createdAt: 'desc' },
         skip: p.skip,
         take: p.take,
       }),
@@ -1931,6 +2076,9 @@ export class ProcurementService {
     const dn = await this.prisma.debitNote.findUniqueOrThrow({ where: { id } });
     if (dn.status !== 'DRAFT')
       throw new BadRequestException('Only draft notes can be cancelled');
+    // Only whoever raised the note can cancel it (older notes saved without a creator stay open to any buyer)
+    if (dn.userId && dn.userId !== user.id)
+      throw new ForbiddenException('Only the person who created this note can cancel it');
     await this.prisma.debitNote.update({
       where: { id },
       data: { status: 'CANCELLED' },
@@ -1950,6 +2098,12 @@ export class PurchaseOrdersController {
   @Can('purchases.view')
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.svc.listPos(q, branchId);
+  }
+
+  @Get('filters')
+  @Can('purchases.view')
+  filters(@BranchId() branchId: string | null) {
+    return this.svc.listFilters('po', branchId);
   }
 
   /** Any signed-in user can see the queue; acting is limited to the assigned approver */
@@ -1973,7 +2127,7 @@ export class PurchaseOrdersController {
 
   /** For the PO form: whether this vendor + delivery branch is billed CGST + SGST or IGST */
   @Get('gst-type')
-  @Can('purchases.manage')
+  @Can('po.create', 'po.edit')
   gstType(@Query('vendorId') vendorId: string, @Query('branchId') branchId: string | undefined, @BranchId() current: string | null) {
     if (!vendorId) throw new BadRequestException('Choose a vendor');
     return this.svc.gstPlace(vendorId, branchId || current);
@@ -1985,13 +2139,13 @@ export class PurchaseOrdersController {
   }
 
   @Post()
-  @Can('purchases.manage')
+  @Can('po.create')
   create(@Body() dto: SavePoDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.svc.savePo(null, dto, user, branchId);
   }
 
   @Put(':id')
-  @Can('purchases.manage')
+  @Can('po.edit')
   update(
     @Param('id') id: string,
     @Body() dto: SavePoDto,
@@ -2035,13 +2189,19 @@ export class PurchaseOrdersController {
 
 // Storekeepers who receive goods (purchases.receive) see the goods-inward list and the GRNs they post
 @Controller('grns')
-@Can('purchases.view', 'purchases.receive')
+@Can('grn.view', 'purchases.receive')
 export class GrnsController {
   constructor(private readonly svc: ProcurementService) {}
 
   @Get()
+  @Can('grn.view', 'purchases.receive')
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.svc.listGrns(q, branchId);
+  }
+
+  @Get('filters')
+  filters(@BranchId() branchId: string | null) {
+    return this.svc.listFilters('grn', branchId);
   }
 
   @Get('pending')
@@ -2061,7 +2221,7 @@ export class GrnsController {
   }
 
   @Post(':id/invoice')
-  @Can('purchases.manage')
+  @Can('invoices.create')
   book(
     @Param('id') id: string,
     @Body() dto: BookInvoiceDto,
@@ -2072,35 +2232,41 @@ export class GrnsController {
 }
 
 @Controller('debit-notes')
-@Can('purchases.view')
+@Can('notes.view')
 export class DebitNotesController {
   constructor(private readonly svc: ProcurementService) {}
 
   @Get()
+  @Can('notes.view')
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.svc.listDebitNotes(q, branchId);
   }
 
+  @Get('filters')
+  filters(@BranchId() branchId: string | null) {
+    return this.svc.listFilters('note', branchId);
+  }
+
   @Post()
-  @Can('purchases.manage')
+  @Can('notes.create')
   create(@Body() dto: CreateDebitNoteDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.svc.createDebitNote(dto, user, branchId);
   }
 
   @Post(':id/send')
-  @Can('purchases.manage')
+  @Can('notes.edit')
   send(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.svc.sendDebitNote(id, user);
   }
 
   @Post(':id/cancel')
-  @Can('purchases.manage')
+  @Can('notes.delete')
   cancel(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.svc.cancelDebitNote(id, user);
   }
 
   @Patch(':id/ship-to')
-  @Can('purchases.manage')
+  @Can('notes.edit')
   shipTo(@Param('id') id: string, @Body() dto: ShipToDto, @CurrentUser() user: AuthUser) {
     return this.svc.setShipTo(id, dto.shipTo, user);
   }
@@ -2116,7 +2282,7 @@ export class ApprovalRulesController {
   }
 
   @Put()
-  @Can('admin.approval_rules')
+  @Can('approval_rules.edit')
   update(@Body() dto: ApprovalConfigDto) {
     return this.approvals.updateConfig(dto);
   }

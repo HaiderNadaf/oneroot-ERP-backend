@@ -153,7 +153,7 @@ export class PurchasesService {
             affectsStock: true,
             affectsBalance: true,
           },
-          orderBy: { noteDate: 'asc' },
+          orderBy: { createdAt: 'desc' },
         },
         user: { select: { name: true } },
       },
@@ -312,11 +312,12 @@ export class PurchasesService {
 }
 
 @Controller('purchases')
-@Can('purchases.view')
+@Can('invoices.view')
 export class PurchasesController {
   constructor(private readonly purchases: PurchasesService) {}
 
   @Get()
+  @Can('invoices.view')
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.purchases.list(q, branchId);
   }
@@ -327,13 +328,13 @@ export class PurchasesController {
   }
 
   @Post()
-  @Can('purchases.manage')
+  @Can('invoices.create')
   create(@Body() dto: CreatePurchaseDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.purchases.create(dto, user, needBranch(branchId));
   }
 
   @Delete(':id')
-  @Can('purchases.cancel')
+  @Can('invoices.delete')
   cancel(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.purchases.cancel(id, user);
   }

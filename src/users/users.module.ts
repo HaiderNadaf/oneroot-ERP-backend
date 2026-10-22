@@ -11,13 +11,13 @@ import {
   Post,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
-import { IsArray, IsBoolean, IsEmail, IsEnum, IsOptional, IsString, Matches, MinLength } from 'class-validator';
+import { IsBoolean, IsEmail, IsEnum, IsOptional, IsString, Matches, MinLength } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
 import { Can, CurrentUser, type AuthUser } from '../common/decorators.js';
 import { Role } from '../generated/prisma/enums.js';
 import { userCache } from '../common/cache.js';
-import { basePermissions, overridesFor } from '../common/access.js';
-import { PERMISSIONS, hasPerm, isPermission, normalizePermissions, type Permission } from '../common/permissions.js';
+import { basePermissions } from '../common/access.js';
+import { PERMISSIONS, hasPerm, type Permission } from '../common/permissions.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
 class CreateUserDto {
@@ -28,10 +28,8 @@ class CreateUserDto {
   @IsOptional() @IsString() phone?: string;
   @IsString() @MinLength(6) password: string;
   @IsEnum(Role) role: Role;
-  /** A custom role (named set of ticks); its base role overrides `role` */
+  /** The role inside a department that gives the user's access; required unless `role` is ADMIN */
   @IsOptional() @IsString() roleTemplateId?: string | null;
-  /** The user's full set of ticks; what differs from the role is kept as their extras / removals. Omitted = exactly the role */
-  @IsOptional() @IsArray() @IsString({ each: true }) permissions?: string[];
 }
 
 class UpdateUserDto {
@@ -40,7 +38,6 @@ class UpdateUserDto {
   @IsOptional() @IsString() phone?: string;
   @IsOptional() @IsEnum(Role) role?: Role;
   @IsOptional() @IsString() roleTemplateId?: string | null;
-  @IsOptional() @IsArray() @IsString({ each: true }) permissions?: string[];
   @IsOptional() @IsBoolean() isActive?: boolean;
   @IsOptional() @IsString() @MinLength(6) password?: string;
   /** Approval PIN for approvers (4–6 digits); empty string removes it */
@@ -54,7 +51,7 @@ const publicFields = {
   phone: true,
   role: true,
   roleTemplateId: true,
-  roleTemplate: { select: { id: true, name: true, department: { select: { id: true, name: true } } } },
+  roleTemplate: { select: { id: true, name: true, baseRole: true, department: { select: { id: true, code: true, name: true } } } },
   permissions: true,
   extraPermissions: true,
   revokedPermissions: true,
@@ -97,26 +94,22 @@ export class UsersService {
   }
 
   /**
-   * Access to store for a user with this role: the given ticks (unknown keys rejected), else exactly the role's.
-   * Returns the full set plus the extras / removals against the role, so later role changes still apply to them.
-   * Administrators need no ticks. A delegated user manager may only hand out what they hold themselves.
+   * Access to store for a user: exactly the permissions of their role inside a department (no per-person ticks).
+   * Everyone but an administrator must hold such a role. A delegated user manager may only hand out what they hold.
    */
-  private async resolveAccess(role: Role, roleTemplateId: string | null, wanted: string[] | undefined, by: AuthUser) {
+  private async resolveAccess(role: Role, tpl: { id: string; departmentId: string | null } | null, by: AuthUser) {
+    const none = { extraPermissions: [] as Permission[], revokedPermissions: [] as Permission[] };
     if (role === 'ADMIN') {
       if (by.role !== 'ADMIN') throw new ForbiddenException('Only an administrator can make someone an administrator');
-      return { permissions: [] as Permission[], extraPermissions: [] as Permission[], revokedPermissions: [] as Permission[] };
+      return { permissions: [] as Permission[], ...none };
     }
-    if (wanted) {
-      const unknown = wanted.filter((k) => !isPermission(k));
-      if (unknown.length) throw new BadRequestException(`Unknown permission: ${unknown.join(', ')}`);
-    }
-    const base = await basePermissions(this.prisma, { role, roleTemplateId });
-    const permissions = wanted ? normalizePermissions(wanted) : base;
+    if (!tpl?.departmentId) throw new BadRequestException('Choose a department and the user\'s role in it');
+    const permissions = await basePermissions(this.prisma, { role, roleTemplateId: tpl.id });
     if (by.role !== 'ADMIN') {
       const beyond = permissions.filter((k) => !by.permissions.includes(k));
       if (beyond.length) throw new ForbiddenException(`You cannot grant what you do not have yourself: ${beyond.join(', ')}`);
     }
-    return { permissions, ...overridesFor(base, permissions) };
+    return { permissions, ...none };
   }
 
   async create(dto: CreateUserDto, by: AuthUser) {
@@ -126,7 +119,7 @@ export class UsersService {
     }
     const tpl = await this.template(dto.roleTemplateId);
     const role = tpl?.baseRole ?? dto.role;
-    const access = await this.resolveAccess(role, role === 'ADMIN' ? null : (tpl?.id ?? null), dto.permissions, by);
+    const access = await this.resolveAccess(role, tpl, by);
     const { permissions } = access;
     const user = await this.prisma.user.create({
       data: {
@@ -141,28 +134,27 @@ export class UsersService {
       },
       select: publicFields,
     });
-    await this.audit.log(by.id, 'CREATE', 'User', user.id, { email, role, roleTemplate: tpl?.name, permissions, extraPermissions: access.extraPermissions, revokedPermissions: access.revokedPermissions });
+    await this.audit.log(by.id, 'CREATE', 'User', user.id, { email, role, roleTemplate: tpl?.name, permissions });
     return strip(user);
   }
 
   async update(id: string, dto: UpdateUserDto, by: AuthUser) {
-    if (id === by.id && (dto.isActive === false || (dto.role && dto.role !== 'ADMIN') || dto.permissions || dto.roleTemplateId)) {
+    if (id === by.id && (dto.isActive === false || (dto.role && dto.role !== 'ADMIN') || dto.roleTemplateId)) {
       throw new BadRequestException('You cannot disable, demote or change the permissions of your own account');
     }
     const current = await this.prisma.user.findUniqueOrThrow({ where: { id }, select: { role: true, permissions: true, roleTemplateId: true } });
     if (by.role !== 'ADMIN' && current.role === 'ADMIN') {
       throw new ForbiddenException('Only an administrator can edit an administrator');
     }
-    const { password, pin, permissions: wanted, roleTemplateId, ...rest } = dto;
+    const { password, pin, roleTemplateId, ...rest } = dto;
     // Custom role: as sent; not sent = kept, unless the built-in role changes (a custom role carries its own)
     const templateId =
       roleTemplateId !== undefined ? roleTemplateId || null : rest.role && rest.role !== current.role ? null : current.roleTemplateId;
     const tpl = await this.template(templateId);
     const role = tpl?.baseRole ?? rest.role ?? current.role;
     const roleChanged = role !== current.role || templateId !== current.roleTemplateId;
-    // Ticks: as given; otherwise a role change resets them to exactly the new role
-    const access =
-      wanted !== undefined || roleChanged ? await this.resolveAccess(role, role === 'ADMIN' ? null : (tpl?.id ?? null), wanted, by) : undefined;
+    // A role change sets the permissions to exactly the new role's
+    const access = roleChanged ? await this.resolveAccess(role, tpl, by) : undefined;
     const permissions = access?.permissions;
     if (pin && !mayHoldPin({ role, permissions: permissions ?? current.permissions })) {
       throw new BadRequestException('Only users who may approve overrides can hold an approval PIN');
@@ -183,7 +175,7 @@ export class UsersService {
       select: publicFields,
     });
     await userCache.delete(id);
-    await this.audit.log(by.id, 'UPDATE', 'User', id, { ...rest, role, roleTemplate: tpl?.name, permissions, extraPermissions: access?.extraPermissions, revokedPermissions: access?.revokedPermissions, passwordChanged: !!password, pinChanged: pin !== undefined });
+    await this.audit.log(by.id, 'UPDATE', 'User', id, { ...rest, role, roleTemplate: tpl?.name, permissions, passwordChanged: !!password, pinChanged: pin !== undefined });
     return strip(user);
   }
 }
@@ -204,11 +196,13 @@ export class UsersController {
   }
 
   @Post()
+  @Can('users.create')
   create(@Body() dto: CreateUserDto, @CurrentUser() user: AuthUser) {
     return this.users.create(dto, user);
   }
 
   @Patch(':id')
+  @Can('users.edit')
   update(@Param('id') id: string, @Body() dto: UpdateUserDto, @CurrentUser() user: AuthUser) {
     return this.users.update(id, dto, user);
   }

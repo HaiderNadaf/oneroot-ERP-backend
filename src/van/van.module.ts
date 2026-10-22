@@ -312,6 +312,7 @@ export class VanController {
   constructor(private readonly van: VanService) {}
 
   @Get()
+  @Can('van.view')
   list(@BranchId() branchId: string | null, @Query() q: Record<string, string>) {
     return this.van.list(branchId, q);
   }
@@ -323,6 +324,7 @@ export class VanController {
   }
 
   @Get(':id')
+  @Can('van.view', 'sales.van')
   get(@Param('id') id: string) {
     return this.van.get(id);
   }

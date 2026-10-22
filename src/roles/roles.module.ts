@@ -7,6 +7,7 @@ import {
   Get,
   Injectable,
   Module,
+  NotFoundException,
   Param,
   Post,
   Put,
@@ -23,8 +24,8 @@ import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 class RoleTemplateDto {
   @IsString() @MinLength(2) name: string;
   @IsOptional() @IsString() description?: string;
-  /** Department this role belongs to; empty = no department */
-  @IsOptional() @IsString() departmentId?: string | null;
+  /** Department this role belongs to; every role sits in one (access is given by department + role) */
+  @IsString() @MinLength(1, { message: 'Choose the department this role belongs to' }) departmentId: string;
   /** Built-in role that supplies the authority limits (never ADMIN) */
   @IsEnum(Role) baseRole: Role;
   @IsArray() @IsString({ each: true }) permissions: string[];
@@ -85,8 +86,7 @@ export class RolesService {
     return perms;
   }
 
-  private async departmentOrNull(id: string | null | undefined) {
-    if (!id) return null;
+  private async departmentOf(id: string) {
     const d = await this.prisma.department.findUnique({ where: { id } });
     if (!d) throw new BadRequestException('That department no longer exists');
     return d.id;
@@ -98,7 +98,7 @@ export class RolesService {
     if (await this.prisma.roleTemplate.findFirst({ where: { name: { equals: name, mode: 'insensitive' } } })) {
       throw new BadRequestException('A role with this name already exists');
     }
-    const departmentId = await this.departmentOrNull(dto.departmentId);
+    const departmentId = await this.departmentOf(dto.departmentId);
     const row = await this.prisma.roleTemplate.create({
       data: { name, description: dto.description?.trim() || null, departmentId, baseRole: dto.baseRole, permissions },
       include: ROLE_INCLUDE,
@@ -112,14 +112,14 @@ export class RolesService {
     const name = dto.name.trim();
     const clash = await this.prisma.roleTemplate.findFirst({ where: { name: { equals: name, mode: 'insensitive' }, NOT: { id } } });
     if (clash) throw new BadRequestException('A role with this name already exists');
-    const departmentId = await this.departmentOrNull(dto.departmentId);
+    const departmentId = await this.departmentOf(dto.departmentId);
     const row = await this.prisma.$transaction(async (tx) => {
       const r = await tx.roleTemplate.update({
         where: { id },
         data: { name, description: dto.description?.trim() || null, departmentId, baseRole: dto.baseRole, permissions },
         include: ROLE_INCLUDE,
       });
-      // Everyone holding the role follows it, keeping their own extras / removals
+      // Everyone holding the role follows it exactly
       await tx.user.updateMany({ where: { roleTemplateId: id }, data: { role: dto.baseRole } });
       await refreshUsers(tx, { roleTemplateId: id });
       return r;
@@ -175,6 +175,13 @@ export class RolesService {
     return rows.map(({ _count, ...d }) => ({ ...d, roleCount: _count.roles }));
   }
 
+  async getDepartment(id: string) {
+    const row = await this.prisma.department.findUnique({ where: { id }, include: { _count: { select: { roles: true } } } });
+    if (!row) throw new NotFoundException('Department not found');
+    const { _count, ...d } = row;
+    return { ...d, roleCount: _count.roles };
+  }
+
   private async checkDepartmentName(name: string, exceptId?: string) {
     const clash = await this.prisma.department.findFirst({ where: { name: { equals: name, mode: 'insensitive' }, ...(exceptId ? { NOT: { id: exceptId } } : {}) } });
     if (clash) throw new BadRequestException('A department with this name already exists');
@@ -183,16 +190,25 @@ export class RolesService {
   async createDepartment(dto: DepartmentDto, by: AuthUser) {
     const name = dto.name.trim();
     await this.checkDepartmentName(name);
-    const row = await this.prisma.department.create({ data: { name, description: dto.description?.trim() || null } });
-    await this.audit.log(by.id, 'CREATE', 'Department', row.id, { name });
-    return { ...row, roleCount: 0 };
+    return this.prisma.$transaction(async (tx) => {
+      // Next department code from one running counter
+      const seq = await tx.sequence.upsert({
+        where: { key: 'DEPT' },
+        create: { key: 'DEPT', value: 1 },
+        update: { value: { increment: 1 } },
+      });
+      const code = `DEPT-${String(seq.value).padStart(4, '0')}`;
+      const row = await tx.department.create({ data: { code, name, description: dto.description?.trim() || null } });
+      await this.audit.log(by.id, 'CREATE', 'Department', row.id, { code, name }, tx);
+      return { ...row, roleCount: 0 };
+    }, TX_OPTIONS);
   }
 
   async updateDepartment(id: string, dto: DepartmentDto, by: AuthUser) {
     const name = dto.name.trim();
     await this.checkDepartmentName(name, id);
     const row = await this.prisma.department.update({ where: { id }, data: { name, description: dto.description?.trim() || null } });
-    await this.audit.log(by.id, 'UPDATE', 'Department', id, { name });
+    await this.audit.log(by.id, 'UPDATE', 'Department', id, { code: row.code, name });
     return row;
   }
 
@@ -202,7 +218,7 @@ export class RolesService {
       throw new BadRequestException(`This department still has ${row._count.roles} role${row._count.roles > 1 ? 's' : ''} — move or delete them first`);
     }
     await this.prisma.department.delete({ where: { id } });
-    await this.audit.log(by.id, 'DELETE', 'Department', id, { name: row.name });
+    await this.audit.log(by.id, 'DELETE', 'Department', id, { code: row.code, name: row.name });
     return { ok: true };
   }
 }
@@ -219,19 +235,19 @@ export class RoleTemplatesController {
   }
 
   @Post()
-  @Can('admin.roles')
+  @Can('roles.create')
   create(@Body() dto: RoleTemplateDto, @CurrentUser() user: AuthUser) {
     return this.roles.create(dto, user);
   }
 
   @Put(':id')
-  @Can('admin.roles')
+  @Can('roles.edit')
   update(@Param('id') id: string, @Body() dto: RoleTemplateDto, @CurrentUser() user: AuthUser) {
     return this.roles.update(id, dto, user);
   }
 
   @Delete(':id')
-  @Can('admin.roles')
+  @Can('roles.delete')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.roles.remove(id, user);
   }
@@ -249,7 +265,7 @@ export class BuiltInRolesController {
   }
 
   @Put(':role')
-  @Can('admin.roles')
+  @Can('roles.edit')
   update(@Param('role') role: string, @Body() dto: RolePermissionsDto, @CurrentUser() user: AuthUser) {
     return this.roles.updateBuiltIn(role, dto, user);
   }
@@ -265,20 +281,26 @@ export class DepartmentsController {
     return this.roles.listDepartments();
   }
 
+  @Get(':id')
+  @Can('admin.roles', 'admin.users')
+  get(@Param('id') id: string) {
+    return this.roles.getDepartment(id);
+  }
+
   @Post()
-  @Can('admin.roles')
+  @Can('roles.create')
   create(@Body() dto: DepartmentDto, @CurrentUser() user: AuthUser) {
     return this.roles.createDepartment(dto, user);
   }
 
   @Put(':id')
-  @Can('admin.roles')
+  @Can('roles.edit')
   update(@Param('id') id: string, @Body() dto: DepartmentDto, @CurrentUser() user: AuthUser) {
     return this.roles.updateDepartment(id, dto, user);
   }
 
   @Delete(':id')
-  @Can('admin.roles')
+  @Can('roles.delete')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.roles.removeDepartment(id, user);
   }

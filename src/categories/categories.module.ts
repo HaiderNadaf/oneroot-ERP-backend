@@ -109,7 +109,7 @@ export class CategoriesController {
   }
 
   @Post()
-  @Can('products.manage')
+  @Can('products.create')
   async create(@Body() dto: CategoryDto) {
     const name = dto.name.trim();
     if (await this.prisma.category.findFirst({ where: { name: { equals: name, mode: 'insensitive' } } })) {
@@ -123,7 +123,7 @@ export class CategoriesController {
   }
 
   @Patch(':id')
-  @Can('products.manage')
+  @Can('products.edit')
   async update(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
     const cat = await this.prisma.category.findUniqueOrThrow({ where: { id } });
     const data: Prisma.CategoryUpdateInput = {};
@@ -171,7 +171,7 @@ export class CategoriesController {
   }
 
   @Delete(':id')
-  @Can('products.manage')
+  @Can('products.delete')
   async remove(@Param('id') id: string) {
     if (await this.prisma.subCategory.count({ where: { categoryId: id } })) throw new BadRequestException('Delete its sub-categories first');
     if (await this.prisma.product.count({ where: { categoryId: id } })) throw new BadRequestException('Category has products — move them first');
@@ -179,7 +179,7 @@ export class CategoriesController {
   }
 
   @Post(':id/sub-categories')
-  @Can('products.manage')
+  @Can('products.create')
   async createSub(@Param('id') categoryId: string, @Body() dto: SubCategoryDto) {
     const cat = await this.prisma.category.findUnique({ where: { id: categoryId } });
     if (!cat) throw new NotFoundException('Category not found');
@@ -202,7 +202,7 @@ export class SubCategoriesController {
   constructor(private readonly prisma: PrismaService) {}
 
   @Patch(':id')
-  @Can('products.manage')
+  @Can('products.edit')
   async update(@Param('id') id: string, @Body() dto: UpdateSubCategoryDto) {
     const sub = await this.prisma.subCategory.findUniqueOrThrow({ where: { id }, include: { category: true } });
     const data: Prisma.SubCategoryUpdateInput = {};
@@ -228,7 +228,7 @@ export class SubCategoriesController {
   }
 
   @Delete(':id')
-  @Can('products.manage')
+  @Can('products.delete')
   async remove(@Param('id') id: string) {
     if (await this.prisma.product.count({ where: { subCategoryId: id } })) throw new BadRequestException('Sub-category has products — move them first');
     return this.prisma.subCategory.delete({ where: { id } });
@@ -245,13 +245,13 @@ export class ExpenseCategoriesController {
   }
 
   @Post()
-  @Can('expenses')
+  @Can('expenses.create')
   create(@Body() dto: ExpenseCategoryDto) {
     return this.prisma.expenseCategory.create({ data: { name: dto.name } });
   }
 
   @Delete(':id')
-  @Can('expenses')
+  @Can('expenses.delete')
   async remove(@Param('id') id: string) {
     if (await this.prisma.expense.count({ where: { categoryId: id } })) {
       throw new BadRequestException('Category has expenses recorded against it');
@@ -295,7 +295,7 @@ export class TaxTypesController {
   }
 
   @Post()
-  @Can('products.manage')
+  @Can('products.create')
   async create(@Body() dto: TaxTypeDto) {
     const data = this.clean(dto);
     await this.assertName(data.name!);
@@ -304,7 +304,7 @@ export class TaxTypesController {
 
   /** Changing the defaults affects new products only; existing products keep their GST / HSN */
   @Patch(':id')
-  @Can('products.manage')
+  @Can('products.edit')
   async update(@Param('id') id: string, @Body() dto: Partial<TaxTypeDto>) {
     const t = await this.prisma.taxType.findUniqueOrThrow({ where: { id } });
     const data = this.clean(dto);
@@ -323,7 +323,7 @@ export class TaxTypesController {
   }
 
   @Delete(':id')
-  @Can('products.manage')
+  @Can('products.delete')
   async remove(@Param('id') id: string) {
     const t = await this.prisma.taxType.findUniqueOrThrow({ where: { id }, include: { _count: { select: { categories: true } } } });
     if (t._count.categories) throw new BadRequestException(`${t._count.categories} categor${t._count.categories === 1 ? 'y uses' : 'ies use'} ${t.name} — move them first`);

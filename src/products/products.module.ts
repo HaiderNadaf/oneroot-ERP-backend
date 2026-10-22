@@ -514,31 +514,31 @@ export class ProductsController {
   }
 
   @Post()
-  @Can('products.manage')
+  @Can('products.create')
   create(@Body() dto: CreateProductDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
     return this.products.create(dto, user, branchId);
   }
 
   @Post('barcodes/generate-missing')
-  @Can('products.manage')
+  @Can('products.edit')
   generateMissing(@CurrentUser() user: AuthUser) {
     return this.products.generateMissingBarcodes(user);
   }
 
   @Post(':id/barcode')
-  @Can('products.manage')
+  @Can('products.edit')
   generateBarcode(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.products.generateBarcode(id, user);
   }
 
   @Patch(':id')
-  @Can('products.manage')
+  @Can('products.edit')
   update(@Param('id') id: string, @Body() dto: UpdateProductDto, @CurrentUser() user: AuthUser) {
     return this.products.update(id, dto, user);
   }
 
   @Delete(':id')
-  @Can('products.manage')
+  @Can('products.delete')
   remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.products.remove(id, user);
   }

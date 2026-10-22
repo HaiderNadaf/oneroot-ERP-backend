@@ -156,13 +156,13 @@ export class AgentsController {
   }
 
   @Post()
-  @Can('vendors.manage')
+  @Can('vendors.create')
   create(@Body() dto: CreateAgentDto, @CurrentUser() user: AuthUser) {
     return this.agents.create(dto, user);
   }
 
   @Patch(':id')
-  @Can('vendors.manage')
+  @Can('vendors.edit')
   update(@Param('id') id: string, @Body() dto: UpdateAgentDto, @CurrentUser() user: AuthUser) {
     return this.agents.update(id, dto, user);
   }

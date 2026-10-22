@@ -117,19 +117,19 @@ export class BranchesController {
   }
 
   @Get()
-  @Can('inventory.transfer', 'purchases.view', 'reports.view', 'admin.users', 'admin.branches')
+  @Can('inventory.transfer', 'purchases.view', 'grn.view', 'invoices.view', 'reports.view', 'admin.users', 'admin.branches')
   list() {
     return this.branches.list();
   }
 
   @Post()
-  @Can('admin.branches')
+  @Can('branches.create')
   create(@Body() dto: CreateBranchDto, @CurrentUser() user: AuthUser) {
     return this.branches.create(dto, user);
   }
 
   @Patch(':id')
-  @Can('admin.branches')
+  @Can('branches.edit')
   update(@Param('id') id: string, @Body() dto: UpdateBranchDto, @CurrentUser() user: AuthUser) {
     return this.branches.update(id, dto, user);
   }

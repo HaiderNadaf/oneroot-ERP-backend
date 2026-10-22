@@ -270,7 +270,7 @@ export class RemindersService implements OnApplicationBootstrap, OnModuleDestroy
     try {
       const { rows, total } = await this.overdueCustomers({});
       if (rows.length) {
-        await this.notifications.toPermitted(['customers.remind', 'customers.manage'], {
+        await this.notifications.toPermitted(['customers.remind', 'customers.edit'], {
           type: 'WARNING',
           title: `${rows.length} customer${rows.length > 1 ? 's are' : ' is'} overdue — ₹${Math.round(total).toLocaleString('en-IN')}`,
           message: rows
@@ -310,15 +310,15 @@ export class RemindersController {
   }
 
   @Post('customers/:id')
-  @Can('customers.manage')
-  @Can('customers.manage')
+  @Can('customers.edit')
+  @Can('customers.edit')
   log(@Param('id') id: string, @Body() dto: LogReminderDto, @CurrentUser() user: AuthUser) {
     return this.reminders.log(id, dto, user);
   }
 
   @Post('customers/:id/send')
-  @Can('customers.manage')
-  @Can('customers.manage')
+  @Can('customers.edit')
+  @Can('customers.edit')
   send(@Param('id') id: string, @Body() dto: SendReminderDto, @CurrentUser() user: AuthUser) {
     return this.reminders.send(id, dto, user);
   }

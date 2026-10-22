@@ -210,6 +210,8 @@ model User {
 /// A department groups the custom roles that belong to one function (Procurement, Sales, Warehouse...)
 model Department {
   id          String   @id @default(cuid())
+  /// DEPT-0001…, given on create from the "DEPT" sequence
+  code        String   @unique
   name        String   @unique
   description String?
   createdAt   DateTime @default(now())

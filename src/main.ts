@@ -13,6 +13,7 @@ import type { Response } from 'express';
 import compression from 'compression';
 import { AppModule } from './app.module.js';
 import { isTransientDbError, lastLine } from './common/db-errors.js';
+import { requestContext } from './common/request-context.js';
 import { Prisma } from './generated/prisma/client.js';
 
 /** Turns Prisma errors into readable 4xx responses instead of generic 500s */
@@ -80,6 +81,8 @@ async function bootstrap() {
   // Close database connections cleanly on restart / deploy (SIGTERM)
   app.enableShutdownHooks();
   app.setGlobalPrefix('api');
+  // Remembers which device each request came from, for the audit log
+  app.use(requestContext);
   // gzip JSON responses (lists shrink 70-80%)
   app.use(compression());
   app.enableCors({ origin: corsOrigin(process.env.CORS_ORIGIN), credentials: true });

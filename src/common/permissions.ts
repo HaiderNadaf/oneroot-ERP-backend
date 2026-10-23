@@ -146,6 +146,28 @@ export const PRODUCT_READ: Permission[] = [
 ];
 
 /**
+ * Customer lookups for the screens that bill, quote or take money from them (POS customer picker, held bills,
+ * quotations, payment receipts, ledgers), without opening the Customers page itself (customers.view)
+ */
+export const CUSTOMER_READ: Permission[] = ['customers.view', 'sales.bill', 'payments.record', 'accounts.view'];
+
+/**
+ * Vendor lookups for the screens that buy from or pay them (PO, purchase bill, debit / credit note, vendor payment,
+ * ledgers), without opening the Vendors page itself (vendors.view)
+ */
+export const VENDOR_READ: Permission[] = [
+  'vendors.view',
+  'po.create',
+  'po.edit',
+  'invoices.view',
+  'invoices.create',
+  'notes.view',
+  'notes.create',
+  'payments.vendor',
+  'accounts.view',
+];
+
+/**
  * Keys that no longer exist since access was split into view / add / edit / delete per module, and what each became.
  * Only removed keys belong here: a key that is still valid is never widened, or unticking a split part would not stick.
  */

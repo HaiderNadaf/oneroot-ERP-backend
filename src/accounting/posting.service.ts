@@ -15,6 +15,7 @@ type Db = PrismaService | Prisma.TransactionClient;
  */
 export const SYSTEM_ACCOUNTS = [
   { key: 'CASH', code: '1000', name: 'Cash-in-hand', type: 'ASSET', group: 'Cash-in-Hand' },
+  { key: 'PETTY_CASH', code: '1005', name: 'Petty Cash', type: 'ASSET', group: 'Cash-in-Hand' },
   { key: 'BANK', code: '1010', name: 'Bank Account', type: 'ASSET', group: 'Bank Accounts' },
   { key: 'UPI', code: '1020', name: 'UPI / Wallet', type: 'ASSET', group: 'Bank Accounts' },
   { key: 'DEBTORS', code: '1100', name: 'Sundry Debtors', type: 'ASSET', group: 'Sundry Debtors' },
@@ -404,6 +405,36 @@ export class PostingService implements OnApplicationBootstrap {
     });
   }
 
+  /** Petty cash: a top-up moves money into the fund from its source; a spend books the expense against the fund */
+  async postPettyCash(tx: Db, e: Prisma.PettyCashEntryGetPayload<object>, category: { id: string; name: string } | null) {
+    const amount = num(e.amount);
+    // Every spend carries an expense category (the service requires one)
+    if (e.type === 'SPEND' && !category) throw new Error(`Petty cash voucher ${e.voucherNo} has no expense category`);
+    const lines: LineInput[] =
+      e.type === 'TOP_UP'
+        ? [
+            { key: 'PETTY_CASH', debit: amount },
+            { key: modeKey(e.sourceMode ?? 'CASH'), credit: amount },
+          ]
+        : [
+            { accountId: await this.expenseAccount(tx, category!), debit: amount },
+            { key: 'PETTY_CASH', credit: amount },
+          ];
+    return this.post(tx, {
+      date: e.entryDate,
+      refType: 'PETTY_CASH',
+      refId: e.id,
+      refNo: e.voucherNo,
+      narration:
+        e.type === 'TOP_UP'
+          ? `Petty cash top-up${e.notes ? `: ${e.notes}` : ''}`
+          : `Petty cash — ${category?.name ?? 'Expense'}${e.paidTo ? ` — ${e.paidTo}` : ''}${e.billNo ? ` (bill ${e.billNo})` : ''}${e.notes ? `: ${e.notes}` : ''}`,
+      branchId: e.branchId,
+      userId: e.userId,
+      lines,
+    });
+  }
+
   /** Posted debit/credit note: the payable drops; goods returns leave stock, money-only notes are income */
   async postNote(
     tx: Db,
@@ -542,6 +573,9 @@ export class PostingService implements OnApplicationBootstrap {
 
     const expenses = await p.expense.findMany({ include: { category: true } });
     for (const e of expenses) jobs.push({ date: e.expenseDate, run: () => this.postExpense(p, e, e.category) });
+
+    const petty = await p.pettyCashEntry.findMany({ include: { category: true } });
+    for (const e of petty) jobs.push({ date: e.entryDate, run: () => this.postPettyCash(p, e, e.category) });
 
     const deposits = await p.bankDeposit.findMany({ include: { shift: { select: { shiftNo: true } } } });
     for (const d of deposits) jobs.push({ date: d.depositDate, run: () => this.postDeposit(p, d, d.shift?.shiftNo ?? null) });

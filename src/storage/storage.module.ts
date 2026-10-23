@@ -1,5 +1,5 @@
 import { Controller, Get, Global, Injectable, Module, NotFoundException, Param, Res } from '@nestjs/common';
-import { GetObjectCommand, NoSuchKey, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, NoSuchKey, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import type { Response } from 'express';
 import type { Readable } from 'node:stream';
 import { Public } from '../common/decorators.js';
@@ -36,6 +36,12 @@ export class StorageService {
     if (!this.configured) throw new Error('Object storage is not set up (S3_BUCKET / AWS_ENDPOINT_URL_S3)');
     await this.s3.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: body, ContentType: contentType }));
     return this.urlFor(key);
+  }
+
+  /** Removes a stored file (no error when it is already gone) */
+  async remove(key: string) {
+    if (!this.configured) return;
+    await this.s3.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }
 
   /** Reads a stored file; null when it does not exist */

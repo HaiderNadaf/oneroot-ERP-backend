@@ -19,6 +19,7 @@ import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { PaymentsService } from '../payments/payments.module.js';
 import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
+import { CUSTOMER_READ } from '../common/permissions.js';
 import { num, paged, paging, round2, type Paging } from '../common/utils.js';
 import { normalizeGstin, stateFromGstin } from '../common/gst.js';
 import type { Prisma } from '../generated/prisma/client.js';
@@ -246,11 +247,13 @@ export class CustomersController {
   constructor(private readonly customers: CustomersService) {}
 
   @Get()
+  @Can(...CUSTOMER_READ)
   list(@Query() q: Record<string, string>) {
     return this.customers.list(q);
   }
 
   @Get(':id')
+  @Can(...CUSTOMER_READ)
   get(@Param('id') id: string) {
     return this.customers.get(id);
   }

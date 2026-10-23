@@ -277,6 +277,7 @@ export class SchemesController {
   constructor(private readonly pricing: PricingService) {}
 
   @Get()
+  @Can('admin.schemes')
   list(@Query() q: { status?: string }) {
     return this.pricing.listSchemes(q);
   }

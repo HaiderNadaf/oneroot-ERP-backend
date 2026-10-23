@@ -467,13 +467,15 @@ export class DashboardService implements OnApplicationBootstrap {
 
   /** Top-bar search across products, batches, parties and documents */
   /** Top-bar search: each kind of record only for users allowed to open it; returns the fields that can explain a match */
-  async search(q: string, user: AuthUser) {
+  async search(q: string, user: AuthUser, branchId: string | null = null) {
     const term = q.trim();
     const none = { products: [], customers: [], vendors: [], sales: [], purchases: [], purchaseOrders: [], batches: [] };
     if (term.length < 2) return none;
     const ci = { contains: term, mode: 'insensitive' as const };
     const may = (...keys: Permission[]) => hasPerm(user, ...keys);
     const skip = Promise.resolve([] as never[]);
+    // Documents and batches stay within the branch being worked in, as on their list pages
+    const branch = branchId ?? undefined;
     const [products, customers, vendors, sales, purchases, purchaseOrders, batches] = await Promise.all([
       may('products.view')
         ? this.prisma.product.findMany({
@@ -499,7 +501,7 @@ export class DashboardService implements OnApplicationBootstrap {
         : skip,
       may('sales.view')
         ? this.prisma.sale.findMany({
-            where: { OR: [{ invoiceNo: ci }, { customerName: ci }, { customerPhone: { contains: term } }] },
+            where: { branchId: branch, OR: [{ invoiceNo: ci }, { customerName: ci }, { customerPhone: { contains: term } }] },
             select: { id: true, invoiceNo: true, customerName: true, customerPhone: true, totalAmount: true, saleDate: true, status: true },
             orderBy: { saleDate: 'desc' },
             take: 5,
@@ -507,7 +509,7 @@ export class DashboardService implements OnApplicationBootstrap {
         : skip,
       may('invoices.view')
         ? this.prisma.purchase.findMany({
-            where: { OR: [{ purchaseNo: ci }, { vendorInvoiceNo: ci }, { vendor: { name: ci } }] },
+            where: { branchId: branch, OR: [{ purchaseNo: ci }, { vendorInvoiceNo: ci }, { vendor: { name: ci } }] },
             select: { id: true, purchaseNo: true, vendorInvoiceNo: true, totalAmount: true, purchaseDate: true, vendor: { select: { name: true } } },
             orderBy: { purchaseDate: 'desc' },
             take: 5,
@@ -515,7 +517,7 @@ export class DashboardService implements OnApplicationBootstrap {
         : skip,
       may('purchases.view')
         ? this.prisma.purchaseOrder.findMany({
-            where: { OR: [{ poNo: ci }, { vendor: { name: ci } }], deletedAt: null },
+            where: { branchId: branch, OR: [{ poNo: ci }, { vendor: { name: ci } }], deletedAt: null },
             select: { id: true, poNo: true, status: true, totalAmount: true, orderDate: true, vendor: { select: { name: true } } },
             orderBy: { createdAt: 'desc' },
             take: 5,
@@ -523,7 +525,7 @@ export class DashboardService implements OnApplicationBootstrap {
         : skip,
       may('inventory.view', 'products.view')
         ? this.prisma.batch.findMany({
-            where: { batchNo: ci, quantity: { gt: 0 } },
+            where: { branchId: branch, batchNo: ci, quantity: { gt: 0 } },
             select: { id: true, batchNo: true, expiryDate: true, quantity: true, product: { select: { id: true, name: true, unit: true } } },
             take: 5,
           })
@@ -543,8 +545,8 @@ export class DashboardController {
   }
 
   @Get('search')
-  search(@Query('q') q = '', @CurrentUser() user: AuthUser) {
-    return this.dashboard.search(q, user);
+  search(@Query('q') q = '', @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
+    return this.dashboard.search(q, user, branchId);
   }
 }
 

@@ -72,6 +72,8 @@ async function main() {
         await tx.journalEntry.deleteMany({ where: { isManual: false } });
         await tx.payment.deleteMany();
         await tx.saleItem.deleteMany();
+        await tx.quotationItem.deleteMany();
+        await tx.quotation.deleteMany();
         await tx.sale.deleteMany();
         await tx.vanTripItem.deleteMany();
         await tx.vanTrip.deleteMany();

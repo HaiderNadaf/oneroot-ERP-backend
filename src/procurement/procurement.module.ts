@@ -641,6 +641,17 @@ export class ProcurementService {
       const products = await tx.product.findMany({
         where: { id: { in: dto.items.map((i) => i.productId) } },
       });
+      // A PO only lists products the vendor supplies (linked on the vendor's page)
+      const supplied = await tx.vendorProduct.findMany({
+        where: { vendorId: dto.vendorId, productId: { in: products.map((p) => p.id) } },
+        select: { productId: true },
+      });
+      const suppliedIds = new Set(supplied.map((s) => s.productId));
+      const notSupplied = products.filter((p) => !suppliedIds.has(p.id));
+      if (notSupplied.length)
+        throw new BadRequestException(
+          `This vendor doesn't supply ${notSupplied.map((p) => p.name).join(', ')} — link the product on the vendor's page, or remove it`,
+        );
       const lines = poLines(dto.items, new Map(products.map((p) => [p.id, p])));
       const subtotal = round2(lines.reduce((s, l) => s + l.taxable, 0));
       const itemsTotal = round2(lines.reduce((s, l) => s + l.amount, 0));
@@ -1022,17 +1033,21 @@ export class ProcurementService {
         };
       }),
     );
+    // Buyers and approvers see the whole queue; anyone else only the POs that name them as an approver
+    const full = hasPerm(user, 'purchases.view', 'purchases.approve');
+    const visible = full ? rows : rows.filter((r) => r.chain.some((c) => c.approverId === user.id));
+    const visibleIds = new Set(visible.map((r) => r.id));
     const byStep = config.steps.map((s) => ({
       title: s.title,
       approverName: s.approver?.name ?? null,
-      waiting: rows.filter((r) => r.waitingFor?.order === s.order).length,
+      waiting: visible.filter((r) => r.waitingFor?.order === s.order).length,
     }));
     return {
-      pending: rows,
-      mine: rows.filter((r) => r.canAct).length,
-      reapprovals: rows.filter((r) => r.round > 1).length,
+      pending: visible,
+      mine: visible.filter((r) => r.canAct).length,
+      reapprovals: visible.filter((r) => r.round > 1).length,
       byStep,
-      decisions,
+      decisions: full ? decisions : decisions.filter((d) => visibleIds.has(d.po.id)),
     };
   }
 
@@ -1166,13 +1181,14 @@ export class ProcurementService {
     return paged(rows, total, p);
   }
 
-  getGrn(id: string) {
-    return this.prisma.grn.findUniqueOrThrow({
+  async getGrn(id: string) {
+    const grn = await this.prisma.grn.findUniqueOrThrow({
       where: { id },
       include: {
         po: { select: { id: true, poNo: true, vendorId: true } },
         vendor: true,
         receivedBy: { select: { name: true } },
+        branch: { select: { id: true, code: true, name: true, address: true, city: true } },
         items: {
           include: {
             product: {
@@ -1185,6 +1201,21 @@ export class ProcurementService {
         debitNotes: { select: { id: true, dnNo: true, status: true } },
       },
     });
+    // Serials that came in on this GRN, shown against the batch (row) each one arrived in
+    const serials = await this.prisma.serialNumber.findMany({
+      where: { inRefType: 'GRN', inRefId: id },
+      select: { serialNo: true, productId: true, batchId: true, status: true },
+      orderBy: { serialNo: 'asc' },
+    });
+    return {
+      ...grn,
+      items: grn.items.map((it) => ({
+        ...it,
+        serials: serials
+          .filter((sn) => sn.productId === it.productId && sn.batchId === it.batchId)
+          .map(({ serialNo, status }) => ({ serialNo, status })),
+      })),
+    };
   }
 
   /** Earlier PO lines for these products (any vendor), newest first, five per product; drafts, cancelled and rejected POs skipped */
@@ -1333,6 +1364,8 @@ export class ProcurementService {
       const qty = { passed: 0, rejected: 0, damaged: 0, expired: 0 };
       // A PO line may arrive split over several batches: count what earlier rows of this GRN already took
       const usedByLine = new Map<string, number>();
+      // Serials typed on earlier rows of this GRN, per product: one unit can't arrive twice
+      const serialsSeen = new Map<string, Set<string>>();
       for (const r of rows) {
         const line = po.items.find((i) => i.id === r.poItemId);
         if (!line) throw new BadRequestException('Item is not on this PO');
@@ -1361,6 +1394,23 @@ export class ProcurementService {
           );
         }
 
+        // Serial-tracked products: one serial per passed unit, each tied to the batch it arrived in
+        const serialNos = (r.serialNos ?? []).map((sn) => sn.trim()).filter(Boolean);
+        if (p.trackSerial && r.passedQty > 0) {
+          if (!Number.isInteger(r.passedQty))
+            throw new BadRequestException(`${p.name} is received per unit with a serial number — batch ${batchNo} quantity must be a whole number`);
+          if (serialNos.length !== r.passedQty)
+            throw new BadRequestException(
+              `${p.name}: enter ${r.passedQty} serial number${r.passedQty === 1 ? '' : 's'} for batch ${batchNo} (${serialNos.length} given)`,
+            );
+          const seen = serialsSeen.get(p.id) ?? new Set<string>();
+          for (const sn of serialNos) {
+            if (seen.has(sn.toUpperCase())) throw new BadRequestException(`${p.name}: serial no. ${sn} is entered twice`);
+            seen.add(sn.toUpperCase());
+          }
+          serialsSeen.set(p.id, seen);
+        }
+
         let batchId: string | null = null;
         if (r.passedQty > 0) {
           const batch = await this.stock.add(tx, {
@@ -1380,8 +1430,8 @@ export class ProcurementService {
             userId: user.id,
           });
           batchId = batch.id;
-          if (p.trackSerial && r.serialNos?.length) {
-            await this.serials.register(tx, { productId: p.id, branchId, batchId: batch.id, serialNos: r.serialNos, refType: 'GRN', refId: grn.id });
+          if (p.trackSerial) {
+            await this.serials.register(tx, { productId: p.id, branchId, batchId: batch.id, serialNos, refType: 'GRN', refId: grn.id, strict: true });
           }
         }
         await tx.grnItem.create({
@@ -1825,6 +1875,9 @@ export class ProcurementService {
               state: true,
               address: true,
               city: true,
+              pincode: true,
+              billingAddress: true,
+              shippingAddress: true,
             },
           },
           grn: { select: { id: true, grnNo: true } },
@@ -2094,8 +2147,9 @@ export class ProcurementService {
 export class PurchaseOrdersController {
   constructor(private readonly svc: ProcurementService) {}
 
+  /** Note raisers pick the PO a debit / credit note is against */
   @Get()
-  @Can('purchases.view')
+  @Can('purchases.view', 'notes.create')
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.svc.listPos(q, branchId);
   }
@@ -2194,7 +2248,7 @@ export class GrnsController {
   constructor(private readonly svc: ProcurementService) {}
 
   @Get()
-  @Can('grn.view', 'purchases.receive')
+  @Can('grn.view', 'purchases.receive', 'notes.create')
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.svc.listGrns(q, branchId);
   }
@@ -2276,7 +2330,9 @@ export class DebitNotesController {
 export class ApprovalRulesController {
   constructor(private readonly approvals: ApprovalsService) {}
 
+  /** The admin page, and the PO form's preview of who will approve */
   @Get()
+  @Can('admin.approval_rules', 'po.create', 'po.edit')
   get() {
     return this.approvals.config();
   }

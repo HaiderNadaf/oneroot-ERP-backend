@@ -329,6 +329,7 @@ export class RolesController {
   constructor(private readonly approvals: ApprovalsService) {}
 
   @Get('limits')
+  @Can('admin.roles', 'admin.users')
   async limits() {
     return Object.values(await this.approvals.limits());
   }

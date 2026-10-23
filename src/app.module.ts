@@ -15,6 +15,7 @@ import { InvalidateOnWrite } from './common/invalidate.interceptor.js';
 import { CustomersModule } from './customers/customers.module.js';
 import { DashboardModule } from './dashboard/dashboard.module.js';
 import { ExpensesModule } from './expenses/expenses.module.js';
+import { PettyCashModule } from './petty-cash/petty-cash.module.js';
 import { InventoryModule } from './inventory/inventory.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { ProcurementModule } from './procurement/procurement.module.js';
@@ -29,10 +30,12 @@ import { VanModule } from './van/van.module.js';
 import { PurchasesModule } from './purchases/purchases.module.js';
 import { ReportsModule } from './reports/reports.module.js';
 import { SalesModule } from './sales/sales.module.js';
+import { QuotationsModule } from './quotations/quotations.module.js';
 import { SettingsModule } from './settings/settings.module.js';
 import { UsersModule } from './users/users.module.js';
 import { RolesModule } from './roles/roles.module.js';
 import { AgentsModule } from './agents/agents.module.js';
+import { AttachmentsModule } from './attachments/attachments.module.js';
 import { VendorsModule } from './vendors/vendors.module.js';
 import { SmsModule } from './sms/sms.module.js';
 import { StorageModule } from './storage/storage.module.js';
@@ -71,12 +74,15 @@ import { RetryReadsOnDbBlip } from './common/db-retry.interceptor.js';
     VanModule,
     ImportModule,
     AgentsModule,
+    AttachmentsModule,
     VendorsModule,
     CustomersModule,
     PurchasesModule,
     ProcurementModule,
     SalesModule,
+    QuotationsModule,
     ExpensesModule,
+    PettyCashModule,
     DashboardModule,
     ReportsModule,
     SmsModule,

@@ -1,8 +1,8 @@
 import { BadRequestException, Body, Controller, Delete, Get, Injectable, Module, NotFoundException, Param, Patch, Post, Query } from '@nestjs/common';
 import { IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
-import { paged, paging, type Paging } from '../common/utils.js';
+import { BranchId, CurrentUser, Can, type AuthUser } from '../common/decorators.js';
+import { dateRange, paged, paging, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 
@@ -31,8 +31,20 @@ export class AgentsService {
     private readonly audit: AuditService,
   ) {}
 
-  /** Agents that are not deleted, newest first */
-  async list(q: Paging & { search?: string }) {
+  /** Completed bills of these agents (in the branch, between the dates): how many and their total */
+  private async salesTotals(agentIds: string[], branchId: string | null, from?: string, to?: string) {
+    if (!agentIds.length) return new Map<string, { count: number; total: number }>();
+    const rows = await this.prisma.sale.groupBy({
+      by: ['agentId'],
+      where: { agentId: { in: agentIds }, status: 'COMPLETED', branchId: branchId ?? undefined, saleDate: dateRange(from, to) },
+      _sum: { totalAmount: true },
+      _count: true,
+    });
+    return new Map(rows.map((r) => [r.agentId as string, { count: r._count, total: Number(r._sum.totalAmount ?? 0) }]));
+  }
+
+  /** Agents that are not deleted, newest first, each with its sales (completed bills) */
+  async list(q: Paging & { search?: string; from?: string; to?: string }, branchId: string | null = null) {
     const p = paging(q);
     const where: Prisma.AgentWhereInput = { deletedAt: null };
     if (q.search) {
@@ -47,7 +59,55 @@ export class AgentsService {
       this.prisma.agent.findMany({ where, include: WITH_BRANCH, orderBy: { createdAt: 'desc' }, skip: p.skip, take: p.take }),
       this.prisma.agent.count({ where }),
     ]);
-    return paged(items, total, p);
+    const sales = await this.salesTotals(items.map((a) => a.id), branchId, q.from, q.to);
+    return paged(
+      items.map((a) => ({ ...a, sales: sales.get(a.id) ?? { count: 0, total: 0 } })),
+      total,
+      p,
+    );
+  }
+
+  /** One agent's bills (newest first) with the totals of every bill in the range, not just this page */
+  async sales(id: string, q: Paging & { from?: string; to?: string; status?: string }, branchId: string | null = null) {
+    const agent = await this.prisma.agent.findUnique({ where: { id }, include: WITH_BRANCH });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const p = paging(q);
+    const where: Prisma.SaleWhereInput = {
+      agentId: id,
+      branchId: branchId ?? undefined,
+      status: q.status === 'CANCELLED' ? 'CANCELLED' : q.status === 'all' ? undefined : 'COMPLETED',
+      saleDate: dateRange(q.from, q.to),
+    };
+    const [items, total, sum] = await Promise.all([
+      this.prisma.sale.findMany({
+        where,
+        select: {
+          id: true,
+          invoiceNo: true,
+          saleDate: true,
+          customerName: true,
+          customer: { select: { id: true, name: true, phone: true } },
+          totalAmount: true,
+          paidAmount: true,
+          paymentMode: true,
+          paymentStatus: true,
+          status: true,
+          branch: { select: { code: true, name: true } },
+          _count: { select: { items: true } },
+        },
+        orderBy: { saleDate: 'desc' },
+        skip: p.skip,
+        take: p.take,
+      }),
+      this.prisma.sale.count({ where }),
+      this.prisma.sale.aggregate({ where, _sum: { totalAmount: true, paidAmount: true } }),
+    ]);
+    return {
+      agent,
+      ...paged(items, total, p),
+      totalAmount: sum._sum.totalAmount ?? 0,
+      paidAmount: sum._sum.paidAmount ?? 0,
+    };
   }
 
   options() {
@@ -138,8 +198,8 @@ export class AgentsController {
   constructor(private readonly agents: AgentsService) {}
 
   @Get()
-  list(@Query() q: Record<string, string>) {
-    return this.agents.list(q);
+  list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
+    return this.agents.list(q, branchId);
   }
 
   /** All agents that are not deleted, for the POS agent picker: billing staff need it without vendor access */
@@ -153,6 +213,13 @@ export class AgentsController {
   @Get('next-code')
   nextCode() {
     return this.agents.nextCode();
+  }
+
+  /** Bills made under this agent, with their total */
+  @Get(':id/sales')
+  @Can('vendors.view', 'sales.view')
+  sales(@Param('id') id: string, @Query() q: Record<string, string>, @BranchId() branchId: string | null) {
+    return this.agents.sales(id, q, branchId);
   }
 
   @Post()

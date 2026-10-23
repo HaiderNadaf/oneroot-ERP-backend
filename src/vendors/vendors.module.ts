@@ -16,11 +16,12 @@ import {
 import { runAtStartup } from '../common/db-errors.js';
 import { PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsEmail, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, Min } from 'class-validator';
+import { ArrayMinSize, IsArray, IsBoolean, IsEmail, IsInt, IsNotEmpty, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 import { ValidateIf } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
+import { VENDOR_READ } from '../common/permissions.js';
 import { num, paged, paging, round2, type Paging } from '../common/utils.js';
 import { GST_STATES, normalizeGstin, stateFromGstin } from '../common/gst.js';
 import { buildLedger, type LedgerEntry } from '../customers/customers.module.js';
@@ -37,6 +38,8 @@ class CreateVendorDto {
   @IsOptional() @IsString() city?: string;
   @IsOptional() @IsString() state?: string;
   @IsOptional() @IsString() pincode?: string;
+  @IsOptional() @IsString() billingAddress?: string;
+  @IsOptional() @IsString() shippingAddress?: string;
   @IsOptional() @IsString() bankName?: string;
   @IsOptional() @IsString() bankAccount?: string;
   @IsOptional() @IsString() ifsc?: string;
@@ -48,11 +51,15 @@ class CreateVendorDto {
 
 class UpdateVendorDto extends PartialType(CreateVendorDto) {}
 
+class LinkProductsDto {
+  @IsArray() @ArrayMinSize(1) @IsString({ each: true }) productIds: string[];
+}
+
 /**
  * Vendor names and addresses are stored in capitals ("abc tractors" → "ABC TRACTORS"), whatever case was typed.
  * State is left as typed: GST compares it with the store's state to pick IGST or CGST + SGST.
  */
-const UPPER_FIELDS = ['name', 'contactPerson', 'address', 'city', 'bankName', 'ifsc'] as const;
+const UPPER_FIELDS = ['name', 'contactPerson', 'address', 'billingAddress', 'shippingAddress', 'city', 'bankName', 'ifsc'] as const;
 function upperVendor<T extends Partial<Record<(typeof UPPER_FIELDS)[number], string>>>(dto: T): T {
   const out: Record<string, unknown> = { ...dto };
   for (const key of UPPER_FIELDS) {
@@ -174,6 +181,32 @@ export class VendorsService {
     return { deleted: true };
   }
 
+  /** Products this vendor supplies, by name */
+  products(id: string) {
+    return this.prisma.vendorProduct
+      .findMany({
+        where: { vendorId: id },
+        include: { product: { select: { id: true, name: true, sku: true, brand: true, packSize: true, unit: true, purchasePrice: true, isActive: true } } },
+        orderBy: { product: { name: 'asc' } },
+      })
+      .then((rows) => rows.map((r) => ({ ...r.product, linkedAt: r.createdAt })));
+  }
+
+  async linkProducts(id: string, productIds: string[], user: AuthUser) {
+    await this.prisma.vendor.findUniqueOrThrow({ where: { id }, select: { id: true } });
+    const found = await this.prisma.product.findMany({ where: { id: { in: productIds } }, select: { id: true } });
+    if (found.length !== new Set(productIds).size) throw new BadRequestException('Some of those products no longer exist');
+    const r = await this.prisma.vendorProduct.createMany({ data: found.map((p) => ({ vendorId: id, productId: p.id })), skipDuplicates: true });
+    await this.audit.log(user.id, 'UPDATE', 'Vendor', id, { linkedProducts: found.map((p) => p.id) });
+    return { added: r.count };
+  }
+
+  async unlinkProduct(id: string, productId: string, user: AuthUser) {
+    await this.prisma.vendorProduct.deleteMany({ where: { vendorId: id, productId } });
+    await this.audit.log(user.id, 'UPDATE', 'Vendor', id, { unlinkedProduct: productId });
+    return { removed: true };
+  }
+
   /** Statement from our side: bills increase what we owe (debit column = amount payable) */
   async ledger(id: string) {
     const vendor = await this.prisma.vendor.findUniqueOrThrow({ where: { id } });
@@ -258,11 +291,13 @@ export class VendorsController {
   constructor(private readonly vendors: VendorsService) {}
 
   @Get()
+  @Can(...VENDOR_READ)
   list(@Query() q: Record<string, string>) {
     return this.vendors.list(q);
   }
 
   @Get(':id')
+  @Can(...VENDOR_READ)
   get(@Param('id') id: string) {
     return this.vendors.get(id);
   }
@@ -270,6 +305,25 @@ export class VendorsController {
   @Get(':id/ledger')
   ledger(@Param('id') id: string) {
     return this.vendors.ledger(id);
+  }
+
+  /** Readable by anyone who raises POs, so the PO form can check its lines against the vendor */
+  @Get(':id/products')
+  @Can(...VENDOR_READ)
+  products(@Param('id') id: string) {
+    return this.vendors.products(id);
+  }
+
+  @Post(':id/products')
+  @Can('vendors.edit')
+  linkProducts(@Param('id') id: string, @Body() dto: LinkProductsDto, @CurrentUser() user: AuthUser) {
+    return this.vendors.linkProducts(id, dto.productIds, user);
+  }
+
+  @Delete(':id/products/:productId')
+  @Can('vendors.edit')
+  unlinkProduct(@Param('id') id: string, @Param('productId') productId: string, @CurrentUser() user: AuthUser) {
+    return this.vendors.unlinkProduct(id, productId, user);
   }
 
   @Post()

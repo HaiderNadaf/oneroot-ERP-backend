@@ -204,6 +204,8 @@ export class ProductsService {
       sort?: string;
       /** "true" adds sellable (unexpired) qty and the next expiry date — used by POS cards */
       withExpiry?: string;
+      /** Only products this vendor supplies (PO item search) */
+      vendorId?: string;
     },
     branchId: string | null = null,
   ) {
@@ -214,6 +216,7 @@ export class ProductsService {
       ...(q.taxTypeId ? { category: { taxTypeId: q.taxTypeId } } : {}),
       subCategoryId: q.subCategoryId || undefined,
       isActive: q.status === 'inactive' ? false : q.status === 'all' ? undefined : true,
+      ...(q.vendorId ? { vendors: { some: { vendorId: q.vendorId } } } : {}),
     };
     // Stock filter: in stock / at or below reorder level / out of stock
     if (branchId) {
@@ -469,7 +472,8 @@ export class ProductsService {
   async remove(id: string, user: AuthUser) {
     const used =
       (await this.prisma.saleItem.count({ where: { productId: id } })) +
-      (await this.prisma.purchaseItem.count({ where: { productId: id } }));
+      (await this.prisma.purchaseItem.count({ where: { productId: id } })) +
+      (await this.prisma.quotationItem.count({ where: { productId: id } }));
     if (used > 0) {
       await this.prisma.product.update({ where: { id }, data: { isActive: false } });
       await this.audit.log(user.id, 'DEACTIVATE', 'Product', id);

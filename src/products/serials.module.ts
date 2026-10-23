@@ -42,7 +42,8 @@ export class SerialsService {
   }
 
   /** Tag units in stock with their serials; serials already known are reported back, not duplicated */
-  async register(db: Db, input: { productId: string; branchId: string; batchId?: string | null; serialNos: string[]; note?: string | null; refType?: string; refId?: string }) {
+  /** `strict` (goods inward): a serial already in stock is an error instead of being skipped */
+  async register(db: Db, input: { productId: string; branchId: string; batchId?: string | null; serialNos: string[]; note?: string | null; refType?: string; refId?: string; strict?: boolean }) {
     const serialNos = clean(input.serialNos);
     if (!serialNos.length) return { added: 0, skipped: [] as string[] };
     const product = await db.product.findUniqueOrThrow({ where: { id: input.productId }, select: { id: true, name: true, trackSerial: true } });
@@ -54,6 +55,10 @@ export class SerialsService {
     const existing = await db.serialNumber.findMany({ where: { productId: product.id, serialNo: { in: serialNos } }, select: { serialNo: true, status: true, id: true } });
     const known = new Map(existing.map((e) => [e.serialNo, e]));
     const skipped: string[] = [];
+    if (input.strict) {
+      const inStock = serialNos.filter((sn) => known.get(sn)?.status === 'IN_STOCK');
+      if (inStock.length) throw new BadRequestException(`${product.name}: serial no. ${inStock.join(', ')} is already in stock`);
+    }
     let added = 0;
     for (const serialNo of serialNos) {
       const k = known.get(serialNo);
@@ -63,7 +68,19 @@ export class SerialsService {
       }
       if (k) {
         // A sold unit that came back (or was re-bought): back in stock under the same serial
-        await db.serialNumber.update({ where: { id: k.id }, data: { status: 'IN_STOCK', branchId: input.branchId, batchId: input.batchId ?? null, saleItemId: null, soldAt: null, note: input.note ?? null } });
+        // It came in again, so it now belongs to this inward (and its batch)
+        await db.serialNumber.update({
+          where: { id: k.id },
+          data: {
+            status: 'IN_STOCK',
+            branchId: input.branchId,
+            batchId: input.batchId ?? null,
+            saleItemId: null,
+            soldAt: null,
+            note: input.note ?? null,
+            ...(input.refType ? { inRefType: input.refType, inRefId: input.refId ?? null } : {}),
+          },
+        });
       } else {
         await db.serialNumber.create({
           data: { productId: product.id, branchId: input.branchId, batchId: input.batchId ?? null, serialNo, status: 'IN_STOCK', note: input.note ?? null, inRefType: input.refType ?? null, inRefId: input.refId ?? null },

@@ -256,6 +256,9 @@ export class ExpenseCategoriesController {
     if (await this.prisma.expense.count({ where: { categoryId: id } })) {
       throw new BadRequestException('Category has expenses recorded against it');
     }
+    if (await this.prisma.pettyCashEntry.count({ where: { categoryId: id } })) {
+      throw new BadRequestException('Category has petty cash vouchers recorded against it');
+    }
     return this.prisma.expenseCategory.delete({ where: { id } });
   }
 }

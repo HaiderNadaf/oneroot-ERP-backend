@@ -126,7 +126,7 @@ class CreateSaleDto {
   @IsOptional() @IsString() managerPin?: string;
   /** Billed on a van trip in the villages: sold from the van's load */
   @IsOptional() @IsString() vanTripId?: string;
-  /** Agent who brought the sale in (internal reference, not printed) */
+  /** Agent who brought the sale in (internal reference, not printed). Required, except on offline bills queued before it was */
   @IsOptional() @IsString() agentId?: string;
 }
 
@@ -297,6 +297,8 @@ export class SalesService {
       // Subsidised fertiliser is sold on the government POS device first; its receipt no. goes on our bill
       const govtReceiptNo = dto.govtReceiptNo?.trim() || null;
       const agentId = dto.agentId || null;
+      // Every bill names its agent; a bill queued offline before that rule may still sync without one
+      if (!agentId && !dto.offlineId) throw new BadRequestException('Choose the agent for this bill');
       if (agentId && !(await tx.agent.findFirst({ where: { id: agentId, deletedAt: null }, select: { id: true } })))
         throw new BadRequestException('That agent was deleted — choose another or leave it empty');
       if (products.some((p) => p.isSubsidised && dto.items.some((i) => i.productId === p.id)) && !govtReceiptNo) {

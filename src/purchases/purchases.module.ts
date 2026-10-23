@@ -316,13 +316,15 @@ export class PurchasesService {
 export class PurchasesController {
   constructor(private readonly purchases: PurchasesService) {}
 
+  /** Debit / credit note raisers pick the bill a note is against */
   @Get()
-  @Can('invoices.view')
+  @Can('invoices.view', 'notes.create')
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.purchases.list(q, branchId);
   }
 
   @Get(':id')
+  @Can('invoices.view', 'notes.create')
   get(@Param('id') id: string) {
     return this.purchases.get(id);
   }

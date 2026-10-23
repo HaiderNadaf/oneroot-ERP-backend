@@ -26,6 +26,7 @@ class UpdateSettingsDto {
   @IsOptional() @IsString() poPrefix?: string;
   @IsOptional() @IsString() receiptPrefix?: string;
   @IsOptional() @IsString() invoiceFooter?: string;
+  @IsOptional() @IsString() vendorTerms?: string;
   @IsOptional() @IsInt() @Min(1) @Max(365) expiryAlertDays?: number;
   @IsOptional() @IsIn(['A4', 'THERMAL_80', 'THERMAL_58']) receiptFormat?: string;
   @IsOptional() @IsString() reminderTemplate?: string;

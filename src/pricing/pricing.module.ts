@@ -36,6 +36,8 @@ class SchemeDto {
   @IsOptional() @IsBoolean() claimable?: boolean;
   @IsOptional() @IsBoolean() isActive?: boolean;
   @IsOptional() @IsString() notes?: string;
+  /** Campaign the offer belongs to; empty = a standalone scheme */
+  @IsOptional() @IsString() campaignId?: string | null;
 }
 
 class CustomerTypeDto {
@@ -67,6 +69,12 @@ export interface PricedLine extends PriceInput {
 }
 
 type SchemeRow = Prisma.SchemeGetPayload<{ include: { products: true } }>;
+
+const SCHEME_INCLUDE = {
+  products: { include: { product: { select: { id: true, name: true, sku: true, salePrice: true } } } },
+  campaign: { select: { id: true, code: true, name: true, from: true, to: true, isActive: true } },
+  _count: { select: { saleItems: true } },
+} as const;
 
 /** The scheme worth most to the farmer on one line (only one applies per line) */
 function bestScheme(schemes: SchemeRow[], productId: string, quantity: number, rate: number) {
@@ -111,6 +119,8 @@ export class PricingService {
         isActive: true,
         from: { lte: day },
         OR: [{ to: null }, { to: { gte: day } }],
+        // A campaign's offers only run while the campaign does (between its dates, and not stopped)
+        AND: [{ OR: [{ campaignId: null }, { campaign: { isActive: true, from: { lte: day }, OR: [{ to: null }, { to: { gte: day } }] } }] }],
         ...(productIds ? { products: { some: { productId: { in: productIds } } } } : {}),
       },
       include: { products: true },
@@ -158,16 +168,17 @@ export class PricingService {
 
   // ───── Schemes CRUD ─────
 
-  listSchemes(q: { status?: string }) {
+  listSchemes(q: { status?: string; campaignId?: string }) {
     const today = new Date();
+    const status: Prisma.SchemeWhereInput =
+      q.status === 'active'
+        ? { isActive: true, from: { lte: today }, OR: [{ to: null }, { to: { gte: today } }] }
+        : q.status === 'all'
+          ? {}
+          : { isActive: true };
     return this.prisma.scheme.findMany({
-      where:
-        q.status === 'active'
-          ? { isActive: true, from: { lte: today }, OR: [{ to: null }, { to: { gte: today } }] }
-          : q.status === 'all'
-            ? {}
-            : { isActive: true },
-      include: { products: { include: { product: { select: { id: true, name: true, sku: true, salePrice: true } } } }, _count: { select: { saleItems: true } } },
+      where: { ...status, ...(q.campaignId ? { campaignId: q.campaignId === 'none' ? null : q.campaignId } : {}) },
+      include: SCHEME_INCLUDE,
       orderBy: [{ isActive: 'desc' }, { from: 'desc' }],
     });
   }
@@ -177,6 +188,14 @@ export class PricingService {
     if (dto.type === 'PCT_OFF' && !dto.pct) throw new BadRequestException('Enter the discount percentage');
     if (dto.type === 'FLAT_OFF' && !dto.flat) throw new BadRequestException('Enter the ₹ off per unit');
     if (dto.to && parseDay(dto.to) < parseDay(dto.from)) throw new BadRequestException('End date is before the start date');
+  }
+
+  /** The campaign a scheme is put in, which must exist */
+  private async campaignOf(dto: SchemeDto) {
+    if (!dto.campaignId) return null;
+    const c = await this.prisma.campaign.findUnique({ where: { id: dto.campaignId }, select: { id: true } });
+    if (!c) throw new BadRequestException('That campaign was not found');
+    return c.id;
   }
 
   async createScheme(dto: SchemeDto, user: AuthUser) {
@@ -194,9 +213,10 @@ export class PricingService {
         claimable: dto.claimable ?? true,
         isActive: dto.isActive ?? true,
         notes: dto.notes?.trim() || null,
+        campaignId: await this.campaignOf(dto),
         products: { create: [...new Set(dto.productIds)].map((productId) => ({ productId })) },
       },
-      include: { products: { include: { product: { select: { id: true, name: true, sku: true, salePrice: true } } } }, _count: { select: { saleItems: true } } },
+      include: SCHEME_INCLUDE,
     });
     await this.audit.log(user.id, 'CREATE', 'Scheme', s.id, { name: s.name, type: s.type });
     return s;
@@ -218,9 +238,10 @@ export class PricingService {
         claimable: dto.claimable ?? true,
         isActive: dto.isActive ?? true,
         notes: dto.notes?.trim() || null,
+        campaignId: await this.campaignOf(dto),
         products: { deleteMany: {}, create: [...new Set(dto.productIds)].map((productId) => ({ productId })) },
       },
-      include: { products: { include: { product: { select: { id: true, name: true, sku: true, salePrice: true } } } }, _count: { select: { saleItems: true } } },
+      include: SCHEME_INCLUDE,
     });
     await this.audit.log(user.id, 'UPDATE', 'Scheme', id, { name: s.name });
     return s;
@@ -278,7 +299,7 @@ export class SchemesController {
 
   @Get()
   @Can('admin.schemes')
-  list(@Query() q: { status?: string }) {
+  list(@Query() q: { status?: string; campaignId?: string }) {
     return this.pricing.listSchemes(q);
   }
 

@@ -386,12 +386,12 @@ model Sequence {
 }
 
 model AuditLog {
-  id        String   @id @default(cuid())
-  userId    String?
-  user      User?    @relation(fields: [userId], references: [id])
-  action    String // CREATE / UPDATE / DELETE / CANCEL / LOGIN
-  entity    String
-  entityId  String?
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+  action     String // CREATE / UPDATE / DELETE / CANCEL / LOGIN
+  entity     String
+  entityId   String?
   details    Json?
   /// The browser's own id (made once and kept in that browser), sent as X-Device-Id
   deviceId   String?
@@ -628,6 +628,7 @@ model Vendor {
   debitNotes     DebitNote[]
   payments       Payment[]
   products       VendorProduct[]
+  branches       VendorBranch[]
 
   @@index([name])
 }
@@ -650,6 +651,32 @@ model Attachment {
   createdAt    DateTime @default(now())
 
   @@index([entityType, entityId])
+}
+
+/// One of a vendor's branches / depots we buy from: its own address, GSTIN and contact
+model VendorBranch {
+  id            String   @id @default(cuid())
+  vendorId      String
+  vendor        Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  name          String
+  /// Short code shown on documents, e.g. "BLR"
+  code          String?
+  contactPerson String?
+  phone         String?
+  email         String?
+  /// The branch's own GSTIN (its state decides CGST + SGST or IGST on a PO)
+  gstin         String?
+  address       String?
+  city          String?
+  state         String?
+  pincode       String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  purchaseOrders PurchaseOrder[]
+
+  @@index([vendorId])
 }
 
 /// Products a vendor supplies: a PO for the vendor can only list these
@@ -727,6 +754,9 @@ model PurchaseOrder {
   poNo                  String              @unique
   vendorId              String
   vendor                Vendor              @relation(fields: [vendorId], references: [id])
+  /// The vendor's branch we buy from (its address and GSTIN go on the PO); empty = the vendor's main address
+  vendorBranchId        String?
+  vendorBranch          VendorBranch?       @relation(fields: [vendorBranchId], references: [id])
   orderDate             DateTime            @default(now())
   expectedDate          DateTime?
   /// How many days the PO stays valid: 7 or 14 (null on POs created before this was added)
@@ -1537,24 +1567,51 @@ model ApprovalRequest {
 
 /// Company scheme applied automatically at the counter: buy X get Y free, % off or flat ₹ off per unit
 model Scheme {
-  id        String     @id @default(cuid())
-  name      String
-  type      SchemeType
-  buyQty    Int?
-  freeQty   Int?
-  pct       Decimal?   @db.Decimal(5, 2)
-  flat      Decimal?   @db.Decimal(12, 2)
-  from      DateTime
-  to        DateTime?
+  id         String     @id @default(cuid())
+  name       String
+  type       SchemeType
+  buyQty     Int?
+  freeQty    Int?
+  pct        Decimal?   @db.Decimal(5, 2)
+  flat       Decimal?   @db.Decimal(12, 2)
+  from       DateTime
+  to         DateTime?
   /// Cost is claimed back from the company
-  claimable Boolean    @default(true)
-  isActive  Boolean    @default(true)
-  notes     String?
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  claimable  Boolean    @default(true)
+  isActive   Boolean    @default(true)
+  notes      String?
+  /// Campaign this offer belongs to; it then only applies while the campaign runs
+  campaignId String?
+  campaign   Campaign?  @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
 
   products  SchemeProduct[]
   saleItems SaleItem[]
+
+  @@index([isActive, from])
+  @@index([campaignId])
+}
+
+/// A promotion ("Kharif 2026 Seed Drive"): its schemes are the offers; sales under them are its results
+model Campaign {
+  id          String    @id @default(cuid())
+  /// CMP-0001…, from the "CMP" sequence
+  code        String    @unique
+  name        String
+  description String?
+  from        DateTime
+  to          DateTime?
+  /// Planned spend on discounts / free goods, to compare with what was given
+  budget      Decimal?  @db.Decimal(14, 2)
+  /// false = stopped early (or cancelled): its schemes no longer apply
+  isActive    Boolean   @default(true)
+  notes       String?
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  schemes Scheme[]
 
   @@index([isActive, from])
 }
@@ -1602,7 +1659,12 @@ model Quotation {
   /// Registered customer the details were filled from, if any
   customerId      String?
   customer        Customer?       @relation(fields: [customerId], references: [id])
+  /// CUSTOMER (a farmer / walk-in: name and contact only) or BUSINESS (a GST-registered firm: GSTIN required, printed in full)
+  partyType       String          @default("CUSTOMER")
+  /// Customer's name, or the business's registered name
   customerName    String
+  /// Business quotes: the person the quote is addressed to
+  contactPerson   String?
   customerPhone   String?
   customerEmail   String?
   customerGstin   String?

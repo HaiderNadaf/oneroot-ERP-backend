@@ -41,7 +41,10 @@ class QuotationItemDto {
 class SaveQuotationDto {
   /** Registered customer the details were filled from (optional: the details below are what prints) */
   @IsOptional() @IsString() customerId?: string;
+  /** CUSTOMER prints the customer's name and contact only; BUSINESS prints the firm's details with its GSTIN */
+  @IsOptional() @IsIn(['CUSTOMER', 'BUSINESS']) partyType?: 'CUSTOMER' | 'BUSINESS';
   @IsString() @IsNotEmpty({ message: 'Customer name is required' }) @MaxLength(200) customerName: string;
+  @IsOptional() @IsString() @MaxLength(100) contactPerson?: string;
   @IsOptional() @IsString() @Matches(/^$|^[6-9]\d{9}$/, { message: 'Phone must be 10 digits starting with 6, 7, 8 or 9' }) customerPhone?: string;
   @IsOptional() @ValidateIf((_, v) => v !== '') @IsEmail({}, { message: 'Enter a valid email' }) customerEmail?: string;
   @IsOptional() @IsString() customerGstin?: string;
@@ -144,7 +147,10 @@ export class QuotationsService {
     const taxAmount = round2(computed.reduce((s, l) => s + l.taxAmount, 0));
     const totalAmount = Math.round(lineTotal);
 
-    const gstin = normalizeGstin(dto.customerGstin) || null;
+    const partyType = dto.partyType ?? 'CUSTOMER';
+    // A business quote carries the firm's GSTIN; a customer quote has none
+    const gstin = partyType === 'BUSINESS' ? normalizeGstin(dto.customerGstin) || null : null;
+    if (partyType === 'BUSINESS' && !gstin) throw new BadRequestException("Enter the business's GSTIN");
     const [settings, branch] = await Promise.all([
       tx.storeSettings.findUnique({ where: { id: 1 } }),
       branchId ? tx.branch.findUnique({ where: { id: branchId } }) : null,
@@ -155,7 +161,9 @@ export class QuotationsService {
 
     const header = {
       customerId: dto.customerId || null,
+      partyType,
       customerName: dto.customerName.trim(),
+      contactPerson: partyType === 'BUSINESS' ? dto.contactPerson?.trim() || null : null,
       customerPhone: dto.customerPhone?.trim() || null,
       customerEmail: dto.customerEmail?.trim() || null,
       customerGstin: gstin,

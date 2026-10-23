@@ -36,6 +36,8 @@ import { UsersModule } from './users/users.module.js';
 import { RolesModule } from './roles/roles.module.js';
 import { AgentsModule } from './agents/agents.module.js';
 import { AttachmentsModule } from './attachments/attachments.module.js';
+import { CampaignsModule } from './campaigns/campaigns.module.js';
+import { VendorBranchesModule } from './vendors/vendor-branches.module.js';
 import { VendorsModule } from './vendors/vendors.module.js';
 import { SmsModule } from './sms/sms.module.js';
 import { StorageModule } from './storage/storage.module.js';
@@ -75,6 +77,8 @@ import { RetryReadsOnDbBlip } from './common/db-retry.interceptor.js';
     ImportModule,
     AgentsModule,
     AttachmentsModule,
+    CampaignsModule,
+    VendorBranchesModule,
     VendorsModule,
     CustomersModule,
     PurchasesModule,

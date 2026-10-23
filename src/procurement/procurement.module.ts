@@ -88,6 +88,8 @@ const PO_EXPIRY_DAYS = [7, 14];
 
 class SavePoDto {
   @IsString() vendorId: string;
+  /** The vendor's branch we buy from; empty = the vendor's main address */
+  @IsOptional() @IsString() vendorBranchId?: string | null;
   /** Branch the goods are delivered to; defaults to the branch selected in the top bar */
   @IsOptional() @IsString() branchId?: string;
   @IsOptional() @IsDateString() orderDate?: string;
@@ -351,13 +353,17 @@ export function chargesGst(charges: number, gstRate: number = CHARGES_GST_RATE) 
  * Place of supply for a PO: the vendor's state (from its GSTIN, else its state field) against the delivery branch's
  * (its GSTIN / state, else the store's). Another state = IGST; same state, or either side unknown = CGST + SGST.
  */
-export async function poGstPlace(db: Tx, vendorId: string, branchId: string | null | undefined) {
-  const [vendor, branch, store] = await Promise.all([
+export async function poGstPlace(db: Tx, vendorId: string, branchId: string | null | undefined, vendorBranchId?: string | null) {
+  const [vendorMain, vendorBranch, branch, store] = await Promise.all([
     db.vendor.findUnique({ where: { id: vendorId }, select: { gstin: true, state: true } }),
+    vendorBranchId ? db.vendorBranch.findUnique({ where: { id: vendorBranchId }, select: { vendorId: true, gstin: true, state: true } }) : null,
     branchId ? db.branch.findUnique({ where: { id: branchId }, select: { gstin: true, state: true } }) : null,
     db.storeSettings.findUnique({ where: { id: 1 }, select: { gstin: true, state: true, stateCode: true } }),
   ]);
-  if (!vendor) throw new BadRequestException('Vendor not found');
+  if (!vendorMain) throw new BadRequestException('Vendor not found');
+  if (vendorBranchId && vendorBranch?.vendorId !== vendorId) throw new BadRequestException("That branch doesn't belong to this vendor");
+  // Buying from a vendor branch: its GSTIN / state decide intra- or inter-state (else the vendor's own)
+  const vendor = vendorBranch && (vendorBranch.gstin || vendorBranch.state) ? vendorBranch : vendorMain;
   const ours = ourGstPlace(branch, store);
   const vendorCode = stateCodeOf(vendor);
   const ourCode = ours ? stateCodeOf(ours) : undefined;
@@ -507,6 +513,7 @@ export class ProcurementService {
         where: listWhere,
         include: {
           vendor: { select: { id: true, code: true, name: true, state: true } },
+          vendorBranch: { select: { id: true, name: true, code: true, city: true } },
           branch: { select: { id: true, code: true, name: true } },
           items: {
             select: {
@@ -561,6 +568,7 @@ export class ProcurementService {
       where: { id, deletedAt: null },
       include: {
         vendor: true,
+        vendorBranch: true,
         branch: { select: { id: true, code: true, name: true, address: true, city: true } },
         createdBy: { select: { id: true, name: true } },
         items: {
@@ -632,8 +640,8 @@ export class ProcurementService {
     };
   }
 
-  gstPlace(vendorId: string, branchId: string | null) {
-    return poGstPlace(this.prisma, vendorId, branchId);
+  gstPlace(vendorId: string, branchId: string | null, vendorBranchId?: string | null) {
+    return poGstPlace(this.prisma, vendorId, branchId, vendorBranchId);
   }
 
   async savePo(id: string | null, dto: SavePoDto, user: AuthUser, currentBranch: string | null = null) {
@@ -676,9 +684,18 @@ export class ProcurementService {
       // Same state as the delivery branch: CGST + SGST; vendor GSTIN from another state: IGST only
       const deliveryBranch =
         dto.branchId ?? (id ? (await tx.purchaseOrder.findUnique({ where: { id }, select: { branchId: true } }))?.branchId : currentBranch);
-      const { isInterState: interState } = await poGstPlace(tx, dto.vendorId, deliveryBranch);
+      const vendorBranchId = dto.vendorBranchId || null;
+      if (vendorBranchId) {
+        const vb = await tx.vendorBranch.findUnique({ where: { id: vendorBranchId }, select: { vendorId: true, isActive: true } });
+        if (!vb || vb.vendorId !== dto.vendorId) throw new BadRequestException("That branch doesn't belong to this vendor");
+        // An inactive branch may stay on a PO that already had it, but isn't picked anew
+        if (!vb.isActive && (!id || (await tx.purchaseOrder.findUnique({ where: { id }, select: { vendorBranchId: true } }))?.vendorBranchId !== vendorBranchId))
+          throw new BadRequestException('That vendor branch is inactive');
+      }
+      const { isInterState: interState } = await poGstPlace(tx, dto.vendorId, deliveryBranch, vendorBranchId);
       const header = {
         vendorId: dto.vendorId,
+        vendorBranchId,
         ...(dto.branchId ? { branchId: dto.branchId } : {}),
         orderDate: docDate(dto.orderDate),
         expectedDate: dto.expectedDate ? parseDay(dto.expectedDate) : null,
@@ -1185,7 +1202,7 @@ export class ProcurementService {
     const grn = await this.prisma.grn.findUniqueOrThrow({
       where: { id },
       include: {
-        po: { select: { id: true, poNo: true, vendorId: true } },
+        po: { select: { id: true, poNo: true, vendorId: true, vendorBranch: true } },
         vendor: true,
         receivedBy: { select: { name: true } },
         branch: { select: { id: true, code: true, name: true, address: true, city: true } },
@@ -2182,9 +2199,14 @@ export class PurchaseOrdersController {
   /** For the PO form: whether this vendor + delivery branch is billed CGST + SGST or IGST */
   @Get('gst-type')
   @Can('po.create', 'po.edit')
-  gstType(@Query('vendorId') vendorId: string, @Query('branchId') branchId: string | undefined, @BranchId() current: string | null) {
+  gstType(
+    @Query('vendorId') vendorId: string,
+    @Query('branchId') branchId: string | undefined,
+    @Query('vendorBranchId') vendorBranchId: string | undefined,
+    @BranchId() current: string | null,
+  ) {
     if (!vendorId) throw new BadRequestException('Choose a vendor');
-    return this.svc.gstPlace(vendorId, branchId || current);
+    return this.svc.gstPlace(vendorId, branchId || current, vendorBranchId || null);
   }
 
   @Get(':id')

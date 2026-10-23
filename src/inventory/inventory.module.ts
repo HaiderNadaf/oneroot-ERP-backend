@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Global, Injectable, Module, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Global, Injectable, Module, Param, Patch, Post, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import {
   ArrayMinSize,
@@ -9,6 +9,7 @@ import {
   IsOptional,
   IsPositive,
   IsString,
+  Min,
   ValidateNested,
 } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
@@ -45,6 +46,13 @@ class AdjustmentDto {
   @IsOptional() @IsString() managerPin?: string;
 }
 
+/** null clears a date; a field left out is kept */
+class UpdateBatchDto {
+  @IsOptional() @IsDateString() mfgDate?: string | null;
+  @IsOptional() @IsDateString() expiryDate?: string | null;
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) costPrice?: number;
+}
+
 @Injectable()
 export class InventoryService {
   constructor(
@@ -55,6 +63,27 @@ export class InventoryService {
     private readonly approvals: ApprovalsService,
     private readonly serials: SerialsService,
   ) {}
+
+  /**
+   * Corrects a batch's Mfg Date, Expiry and Cost. POs, GRNs and purchase invoices keep the values they were
+   * saved with (their own columns); only what happens from now on — sales, transfers, write-offs — uses the new ones.
+   */
+  async updateBatch(id: string, dto: UpdateBatchDto, user: AuthUser) {
+    if (user.role !== 'ADMIN') throw new ForbiddenException('Only an administrator can edit a batch');
+    const before = await this.prisma.batch.findUniqueOrThrow({ where: { id } });
+    const date = (v: string | null | undefined, old: Date | null) => (v === undefined ? old : v ? new Date(v) : null);
+    const mfgDate = date(dto.mfgDate, before.mfgDate);
+    const expiryDate = date(dto.expiryDate, before.expiryDate);
+    if (mfgDate && expiryDate && mfgDate >= expiryDate) throw new BadRequestException('Expiry must be after the Mfg Date');
+    const costPrice = dto.costPrice ?? num(before.costPrice);
+    const updated = await this.prisma.batch.update({ where: { id }, data: { mfgDate, expiryDate, costPrice } });
+    await this.audit.log(user.id, 'UPDATE', 'Batch', id, {
+      batchNo: before.batchNo,
+      before: { mfgDate: before.mfgDate, expiryDate: before.expiryDate, costPrice: num(before.costPrice) },
+      after: { mfgDate, expiryDate, costPrice },
+    });
+    return updated;
+  }
 
   async batches(q: Paging & { productId?: string; status?: string; search?: string; expiry?: string }, branchId: string | null = null) {
     const p = paging(q);
@@ -324,6 +353,11 @@ export class InventoryController {
   @Get('batches')
   batches(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.inventory.batches(q, branchId);
+  }
+
+  @Patch('batches/:id')
+  updateBatch(@Param('id') id: string, @Body() dto: UpdateBatchDto, @CurrentUser() user: AuthUser) {
+    return this.inventory.updateBatch(id, dto, user);
   }
 
   @Get('movements')

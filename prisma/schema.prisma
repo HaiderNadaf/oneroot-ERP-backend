@@ -340,6 +340,8 @@ model StoreSettings {
   receiptPrefix       String   @default("RCT")
   currency            String   @default("INR")
   invoiceFooter       String?  @default("Thank you for your business!")
+  /// Terms & conditions shown at the bottom of the New Vendor form (admin edits them here)
+  vendorTerms         String?
   expiryAlertDays     Int      @default(60)
   /// Default print layout for bills: A4 invoice or thermal receipt (80 mm / 58 mm)
   receiptFormat       String   @default("A4")

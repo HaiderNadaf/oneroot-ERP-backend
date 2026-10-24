@@ -17,7 +17,7 @@ import { ApprovalsService } from '../approvals/approvals.module.js';
 import { AuditService } from '../audit/audit.service.js';
 import { BranchId, CurrentUser, needBranch, Can, type AuthUser } from '../common/decorators.js';
 import { permittedWhere } from '../common/permissions.js';
-import { dateRange, docDate, nextDocNo, num, paged, paging, startOfDay, type Paging } from '../common/utils.js';
+import { dateRange, docDate, nextDocNo, num, paged, paging, round2, startOfDay, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import type { StockMovementType } from '../generated/prisma/enums.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
@@ -121,7 +121,7 @@ export class InventoryService {
       this.prisma.batch.findMany({
         where,
         include: {
-          product: { select: { id: true, name: true, sku: true, unit: true, type: true, location: true } },
+          product: { select: { id: true, name: true, sku: true, unit: true, type: true, location: true, salePrice: true } },
           branch: { select: { id: true, code: true, name: true } },
         },
         orderBy: [{ expiryDate: { sort: 'asc', nulls: 'last' } }],
@@ -130,7 +130,31 @@ export class InventoryService {
       }),
       this.prisma.batch.count({ where }),
     ]);
-    return paged(items, total, p);
+
+    // Weighted average cost of each product on the page: its in-stock batches in this branch (every branch when none is chosen)
+    const productIds = [...new Set(items.map((b) => b.productId))];
+    const lots = productIds.length
+      ? await this.prisma.batch.findMany({
+          where: { productId: { in: productIds }, branchId: branchId ?? undefined, quantity: { gt: 0 } },
+          select: { productId: true, quantity: true, costPrice: true },
+        })
+      : [];
+    const sums = new Map<string, { qty: number; value: number }>();
+    for (const l of lots) {
+      const s = sums.get(l.productId) ?? { qty: 0, value: 0 };
+      s.qty += num(l.quantity);
+      s.value += num(l.quantity) * num(l.costPrice);
+      sums.set(l.productId, s);
+    }
+    const avgCost = (productId: string) => {
+      const s = sums.get(productId);
+      return s && s.qty > 0 ? round2(s.value / s.qty) : null;
+    };
+    return paged(
+      items.map((b) => ({ ...b, avgCost: avgCost(b.productId) })),
+      total,
+      p,
+    );
   }
 
   async movements(q: Paging & { productId?: string; type?: string; from?: string; to?: string }, branchId: string | null = null) {

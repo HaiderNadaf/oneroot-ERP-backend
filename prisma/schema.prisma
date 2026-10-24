@@ -18,6 +18,13 @@ enum Role {
   ACCOUNTANT
 }
 
+/// Seniority of a role inside its department: L1 (entry) up to L3 (senior)
+enum RoleLevel {
+  L1
+  L2
+  L3
+}
+
 enum ProductType {
   SEED
   FERTILIZER
@@ -166,6 +173,8 @@ model User {
   name               String
   email              String    @unique
   phone              String?
+  /// Job title shown on the user, e.g. Senior Accountant (separate from the role that gives access)
+  designation        String?
   passwordHash       String
   /// Approval PIN (hashed) for managers who sign off counter overrides
   pinHash            String?
@@ -201,8 +210,10 @@ model User {
   heldBills        HeldBill[]
   vanTrips         VanTrip[]
   attachments      Attachment[]
-  /// Home branch; staff only see this branch. Empty = can work in every branch
+  /// Home branch: where they start (the first of branchIds). Empty = can work in every branch
   branchId         String?
+  /// Branches the user may work in; empty = all branches. Staff with several switch between just these
+  branchIds        String[]          @default([])
   branch           Branch?           @relation(fields: [branchId], references: [id])
   /// Custom role this user was given (a named set of ticks); role above is its base role
   roleTemplateId   String?
@@ -238,6 +249,8 @@ model RoleTemplate {
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id])
   baseRole     Role
+  /// Seniority within the department (L1 entry … L3 senior)
+  level        RoleLevel   @default(L1)
   permissions  String[]    @default([])
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt

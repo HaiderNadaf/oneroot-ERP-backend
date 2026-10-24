@@ -13,6 +13,8 @@ export interface AuthUser {
   roleTemplate?: { name: string } | null;
   /** Home branch; null = may work in every branch */
   branchId: string | null;
+  /** Branches the user may work in; empty = all */
+  branchIds?: string[];
 }
 
 export const IS_PUBLIC_KEY = 'isPublic';

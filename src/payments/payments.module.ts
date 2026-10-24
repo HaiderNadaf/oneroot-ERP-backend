@@ -30,6 +30,10 @@ class CreatePaymentDto {
   @IsString() partyId: string;
   /** Apply to one specific bill; otherwise allocated to the oldest unpaid bills */
   @IsOptional() @IsString() documentId?: string;
+  /** Vendor advance against this PO (before its goods arrive); set against the PO's invoice once booked */
+  @IsOptional() @IsString() poId?: string;
+  /** Vendor payment for the goods on this GRN (applied to its invoice) */
+  @IsOptional() @IsString() grnId?: string;
   @Type(() => Number) @IsNumber() @IsPositive() amount: number;
   @IsEnum(PaymentMode) mode: PaymentMode;
   @IsOptional() @IsString() reference?: string;
@@ -124,8 +128,8 @@ export class PaymentsService {
     return payment;
   }
 
-  /** Money paid to a vendor */
-  async pay(tx: Tx, vendorId: string, purchaseId: string | null, input: PaymentInput) {
+  /** Money paid to a vendor (`link.poId` = an advance on that PO: kept for its invoice, not spread over older bills) */
+  async pay(tx: Tx, vendorId: string, purchaseId: string | null, input: PaymentInput, link: { poId?: string; grnId?: string } = {}) {
     const paymentNo = await nextDocNo(tx, 'PAY', input.paymentDate);
     const payment = await tx.payment.create({
       data: {
@@ -134,6 +138,8 @@ export class PaymentsService {
         partyType: 'VENDOR',
         vendorId,
         purchaseId,
+        poId: link.poId ?? null,
+        grnId: link.grnId ?? null,
         branchId: input.branchId ?? null,
         shiftId: await this.shiftId(tx, input),
         amount: input.amount,
@@ -147,6 +153,8 @@ export class PaymentsService {
     const vendor = await tx.vendor.update({ where: { id: vendorId }, data: { balance: { decrement: input.amount } } });
     if (purchaseId) {
       await this.applyToDoc(tx, 'purchase', purchaseId, input.amount);
+    } else if (link.poId) {
+      await tx.purchaseOrder.update({ where: { id: link.poId }, data: { advancePaid: { increment: input.amount } } });
     } else {
       await this.allocate(tx, 'purchase', { vendorId, status: 'COMPLETED' }, input.amount);
     }
@@ -231,6 +239,30 @@ export class PaymentsService {
       if (dto.partyType === 'CUSTOMER' && !hasPerm(user, 'payments.record')) {
         throw new ForbiddenException('You do not have permission to record customer receipts');
       }
+      if (dto.poId || dto.grnId) {
+        if (dto.partyType !== 'VENDOR') throw new BadRequestException('Only vendor payments go against a PO or GRN');
+        if (dto.poId && dto.grnId) throw new BadRequestException('Pay against the PO or the GRN, not both');
+      }
+      if (dto.poId) {
+        // Advance before delivery: up to what is still due on the PO's advance
+        const po = await tx.purchaseOrder.findUnique({ where: { id: dto.poId }, select: { poNo: true, vendorId: true, status: true, deletedAt: true, paymentTerm: true, advanceAmount: true, advancePaid: true } });
+        if (!po || po.deletedAt || po.vendorId !== dto.partyId) throw new BadRequestException('PO not found for this vendor');
+        if (po.paymentTerm === 'AFTER_GRN') throw new BadRequestException(`${po.poNo} is paid after goods inward — pay against its GRN`);
+        if (!['APPROVED', 'PARTIALLY_RECEIVED', 'RECEIVED'].includes(po.status)) throw new BadRequestException(`${po.poNo} is not approved yet`);
+        const due = round2(num(po.advanceAmount) - num(po.advancePaid));
+        if (due <= 0) throw new BadRequestException(`The advance on ${po.poNo} is already paid`);
+        if (dto.amount > due + 0.004) throw new BadRequestException(`Amount exceeds the advance still due on ${po.poNo} (₹${due})`);
+        const payment = await this.pay(tx, dto.partyId, null, { ...input, notes: input.notes ?? `Advance against ${po.poNo}` }, { poId: dto.poId });
+        await this.audit.log(user.id, 'CREATE', 'Payment', payment.id, { ...dto }, tx);
+        return payment;
+      }
+      if (dto.grnId) {
+        // For the goods received: paid against the GRN's invoice
+        const grn = await tx.grn.findUnique({ where: { id: dto.grnId }, select: { grnNo: true, vendorId: true, purchase: { select: { id: true, status: true } } } });
+        if (!grn || grn.vendorId !== dto.partyId) throw new BadRequestException('GRN not found for this vendor');
+        if (!grn.purchase || grn.purchase.status !== 'COMPLETED') throw new BadRequestException(`${grn.grnNo} has no invoice booked yet — book it from the GRN first`);
+        dto.documentId = grn.purchase.id;
+      }
       if (dto.documentId) {
         const doc =
           dto.partyType === 'CUSTOMER'
@@ -246,7 +278,7 @@ export class PaymentsService {
       const payment =
         dto.partyType === 'CUSTOMER'
           ? await this.receive(tx, dto.partyId, dto.documentId ?? null, input)
-          : await this.pay(tx, dto.partyId, dto.documentId ?? null, input);
+          : await this.pay(tx, dto.partyId, dto.documentId ?? null, input, dto.grnId ? { grnId: dto.grnId } : {});
       await this.audit.log(user.id, 'CREATE', 'Payment', payment.id, { ...dto }, tx);
       return payment;
     }, TX_OPTIONS);
@@ -263,9 +295,15 @@ export class PaymentsService {
         if (p.saleId) await this.applyToDoc(tx, 'sale', p.saleId, -amount);
         else if (p.customerId) await this.deallocate(tx, 'sale', { customerId: p.customerId }, amount);
       } else if (p.vendorId) {
+        if (p.poId && !p.purchaseId) {
+          const po = await tx.purchaseOrder.findUniqueOrThrow({ where: { id: p.poId }, select: { poNo: true, advancePaid: true, advanceApplied: true } });
+          if (num(po.advancePaid) - amount < num(po.advanceApplied) - 0.004)
+            throw new BadRequestException(`This advance is already set against the invoice of ${po.poNo}, so it can't be deleted`);
+          await tx.purchaseOrder.update({ where: { id: p.poId }, data: { advancePaid: { decrement: amount } } });
+        }
         await tx.vendor.update({ where: { id: p.vendorId }, data: { balance: { increment: amount } } });
         if (p.purchaseId) await this.applyToDoc(tx, 'purchase', p.purchaseId, -amount);
-        else await this.deallocate(tx, 'purchase', { vendorId: p.vendorId }, amount);
+        else if (!p.poId) await this.deallocate(tx, 'purchase', { vendorId: p.vendorId }, amount);
       }
       await this.posting.reverse(tx, 'PAYMENT', id, { narration: `${p.paymentNo} deleted`, userId: user.id });
       await tx.payment.delete({ where: { id } });
@@ -293,6 +331,10 @@ export class PaymentsService {
           totalAmount: true,
           vendor: { select: { id: true, name: true } },
           purchases: { where: live, select: { paidAmount: true } },
+          paymentTerm: true,
+          advanceAmount: true,
+          advancePaid: true,
+          advanceApplied: true,
         },
         orderBy: { orderDate: 'asc' },
       }),
@@ -314,7 +356,8 @@ export class PaymentsService {
     const poRows = pos
       .map((po) => {
         const total = num(po.totalAmount);
-        const paid = round2(po.purchases.reduce((s, p) => s + num(p.paidAmount), 0));
+        // Paid on its invoices, plus advance not yet set against an invoice
+        const paid = round2(po.purchases.reduce((s, p) => s + num(p.paidAmount), 0) + num(po.advancePaid) - num(po.advanceApplied));
         return { id: po.id, poNo: po.poNo, status: po.status, orderDate: po.orderDate, vendor: po.vendor, total, paid, pending: round2(total - paid) };
       })
       .filter((r) => r.pending > 0.005);
@@ -343,8 +386,30 @@ export class PaymentsService {
       })
       .filter((r) => r.pending > 0.005);
 
+    // Advances to pay: approved POs on advance terms with part of the advance still unpaid (received ones too)
+    const advancePos = await this.prisma.purchaseOrder.findMany({
+      where: { branchId: branchId ?? undefined, deletedAt: null, paymentTerm: { not: 'AFTER_GRN' }, status: { in: ['APPROVED', 'PARTIALLY_RECEIVED', 'RECEIVED'] } },
+      select: { id: true, poNo: true, status: true, orderDate: true, totalAmount: true, paymentTerm: true, advanceAmount: true, advancePaid: true, vendor: { select: { id: true, name: true } } },
+      orderBy: { orderDate: 'asc' },
+    });
+    const advanceRows = advancePos
+      .map((po) => ({
+        id: po.id,
+        poNo: po.poNo,
+        status: po.status,
+        orderDate: po.orderDate,
+        vendor: po.vendor,
+        paymentTerm: po.paymentTerm,
+        total: num(po.totalAmount),
+        advance: num(po.advanceAmount),
+        paid: num(po.advancePaid),
+        pending: round2(num(po.advanceAmount) - num(po.advancePaid)),
+      }))
+      .filter((r) => r.pending > 0.005);
+
     const sum = <T,>(rows: T[], k: (r: T) => number) => round2(rows.reduce((s, r) => s + k(r), 0));
     return {
+      advance: { count: advanceRows.length, advance: sum(advanceRows, (r) => r.advance), paid: sum(advanceRows, (r) => r.paid), pending: sum(advanceRows, (r) => r.pending), rows: advanceRows },
       po: { count: poRows.length, total: sum(poRows, (r) => r.total), paid: sum(poRows, (r) => r.paid), pending: sum(poRows, (r) => r.pending), rows: poRows },
       grn: {
         count: grnRows.length,
@@ -377,6 +442,8 @@ export class PaymentsService {
           vendor: { select: { id: true, name: true } },
           sale: { select: { id: true, invoiceNo: true, customerName: true } },
           purchase: { select: { id: true, purchaseNo: true } },
+          po: { select: { id: true, poNo: true } },
+          grn: { select: { id: true, grnNo: true } },
         },
         orderBy: { paymentDate: 'desc' },
         skip: p.skip,

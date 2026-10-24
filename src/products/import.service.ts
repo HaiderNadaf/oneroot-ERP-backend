@@ -2,6 +2,7 @@ import { BadRequestException, Body, Controller, Injectable, Module, Post } from 
 import { IsArray, IsBoolean, IsOptional } from 'class-validator';
 import { BranchId, Can, CurrentUser, type AuthUser } from '../common/decorators.js';
 import { formatSku, skuSeqKey } from '../common/sku.js';
+import { num, round2 } from '../common/utils.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ProductsModule, ProductsService, assertNotDuplicate, sameProduct } from './products.module.js';
 
@@ -209,6 +210,9 @@ export class ImportService {
         continue;
       }
 
+      // The sheet's purchase price is incl. GST (as typed on the product form); products keep it excl. GST.
+      // GST comes from the row, else the product being updated, else 0 (the default for a new product)
+      const purchaseGst = gstRate ?? (existing ? num(existing.gstRate) : 0);
       const data = {
         name,
         ...(barcode ? { barcode } : {}),
@@ -222,7 +226,7 @@ export class ImportService {
         packSize: str(r.packSize) || undefined,
         mrp: nums.mrp,
         salePrice: nums.salePrice,
-        purchasePrice: nums.purchasePrice,
+        purchasePrice: nums.purchasePrice === undefined ? undefined : round2(nums.purchasePrice / (1 + purchaseGst / 100)),
         reorderLevel: nums.reorderLevel,
         trackBatch: bools.trackBatch,
         isSubsidised: bools.isSubsidised,

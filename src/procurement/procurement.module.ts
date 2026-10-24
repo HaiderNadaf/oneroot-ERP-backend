@@ -58,13 +58,14 @@ import {
   NoteReason,
   NoteType,
   PaymentMode,
+  PoPaymentTerm,
   PurchaseOrderStatus,
   RoleLevel,
 } from '../generated/prisma/enums.js';
 import { StockService } from '../inventory/stock.service.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
 import { PaymentsService } from '../payments/payments.module.js';
-import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
+import { LONG_TX_OPTIONS, PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 import { SerialsService } from '../products/serials.module.js';
 import { calcPurchaseItem } from '../purchases/purchases.module.js';
 import { SmsService } from '../sms/sms.service.js';
@@ -74,6 +75,8 @@ import { PoExpiryService } from './po-expiry.service.js';
 type Tx = Prisma.TransactionClient;
 /** Thrown at the end of a goods-inward dry run so its transaction rolls back */
 const DRY_RUN = Symbol('grn-dry-run');
+/** Goods inward waits for the approval chain before it is posted (off for now: posted straight away) */
+const GRN_APPROVAL = false;
 
 // ───────────────────────── DTOs ─────────────────────────
 
@@ -117,6 +120,10 @@ class SavePoDto {
   /** GST % on the other charges, 18 when not given */
   @IsOptional() @Type(() => Number) @IsIn(GST_RATES, { message: `GST must be one of ${GST_RATES.join(', ')}` }) otherChargesGstRate?: number;
   @IsOptional() @IsString() otherChargesNote?: string;
+  /** When the vendor is paid: after goods inward (default), 100% advance, or a partial advance */
+  @IsOptional() @IsEnum(PoPaymentTerm) paymentTerm?: PoPaymentTerm;
+  /** The advance in rupees, for a partial advance (the balance is paid after goods inward) */
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) advanceAmount?: number;
   /** true = submit for approval, false = save as draft */
   @IsBoolean() submit: boolean;
 }
@@ -137,6 +144,17 @@ class DecideDto {
   @IsOptional() @IsString() note?: string;
 }
 
+/** Why goods were not accepted at inward */
+const GRN_ISSUES = ['DAMAGED', 'LEAKAGE', 'EXPIRED', 'QUALITY', 'OTHER'] as const;
+type GrnIssue = (typeof GRN_ISSUES)[number];
+const GRN_ISSUE_LABEL: Record<GrnIssue, string> = {
+  DAMAGED: 'Damaged in transit',
+  LEAKAGE: 'Leakage',
+  EXPIRED: 'Expired',
+  QUALITY: 'Quality / wrong item',
+  OTHER: 'Other',
+};
+
 class GrnItemDto {
   @IsString() poItemId: string;
   @Type(() => Number) @IsNumber() @Min(0) passedQty: number;
@@ -150,6 +168,10 @@ class GrnItemDto {
   @IsOptional() @IsString() location?: string;
   /** Serial numbers of the passed units (products that track serials) */
   @IsOptional() @IsArray() @IsString({ each: true }) serialNos?: string[];
+  /** Why the rejected / damaged / expired quantity on this row was not accepted */
+  @IsOptional() @IsIn(GRN_ISSUES) issueReason?: GrnIssue;
+  /** What was wrong (required for "Other") */
+  @IsOptional() @IsString() @MaxLength(300) issueRemark?: string;
 }
 
 class CreateGrnDto {
@@ -421,6 +443,53 @@ export class ProcurementService {
 
   /** Chain with each step's state, for list chips and the detail view */
   /** The chain a PO was submitted with (rules may have changed since); computed for old POs without a snapshot */
+  /** Active users on a role in the Finance department: they record vendor payments */
+  private async financeUserIds(db: Tx | PrismaService) {
+    const users = await db.user.findMany({
+      where: { isActive: true, roleTemplate: { department: { name: { equals: 'Finance', mode: 'insensitive' } } } },
+      select: { id: true },
+    });
+    return users.map((u) => u.id);
+  }
+
+  private async notifyFinance(input: Parameters<NotificationsService['toUsers']>[1], db: Tx) {
+    await this.notifications.toUsers(await this.financeUserIds(db), input, db);
+  }
+
+  /**
+   * A GRN's invoice was booked: set the PO's unused advance against it, then tell Finance what is still to pay
+   * on that GRN (nothing when the advance covers it).
+   */
+  private async applyAdvanceAndNotify(tx: Tx, purchaseId: string) {
+    const bill = await tx.purchase.findUniqueOrThrow({
+      where: { id: purchaseId },
+      select: { id: true, purchaseNo: true, totalAmount: true, paidAmount: true, vendor: { select: { name: true } }, grn: { select: { id: true, grnNo: true } }, poId: true },
+    });
+    let due = round2(num(bill.totalAmount) - num(bill.paidAmount));
+    if (bill.poId) {
+      const po = await tx.purchaseOrder.findUniqueOrThrow({ where: { id: bill.poId }, select: { poNo: true, advancePaid: true, advanceApplied: true } });
+      const unused = round2(num(po.advancePaid) - num(po.advanceApplied));
+      const apply = round2(Math.min(unused, due));
+      if (apply > 0) {
+        // The vendor's balance already went down when the advance was paid; only the bill is marked paid
+        await this.payments.applyToDoc(tx, 'purchase', bill.id, apply);
+        await tx.purchaseOrder.update({ where: { id: bill.poId }, data: { advanceApplied: { increment: apply } } });
+        due = round2(due - apply);
+      }
+    }
+    if (due > 0.004 && bill.grn)
+      await this.notifyFinance(
+        {
+          type: 'WARNING',
+          title: `Payment due: ${bill.grn.grnNo} · ₹${due}`,
+          message: `Goods received from ${bill.vendor.name} (invoice ${bill.purchaseNo}) — record the payment against the GRN`,
+          module: 'Payments',
+          link: '/payments?tab=pending',
+        },
+        tx,
+      );
+  }
+
   private async chainOf(
     po: { levelsNeeded: number; totalAmount: unknown; approvalChain?: unknown },
     db?: Tx,
@@ -688,6 +757,18 @@ export class ProcurementService {
       // Whole rupees: up to .49 goes down, .50 and above goes up
       const totalAmount = Math.round(raw);
       const roundOff = round2(totalAmount - raw);
+      // Payment terms: 100% advance is the whole total; a partial advance is the amount typed (less than the total)
+      const paymentTerm = dto.paymentTerm ?? 'AFTER_GRN';
+      const advanceAmount =
+        paymentTerm === 'ADVANCE_FULL' ? totalAmount : paymentTerm === 'ADVANCE_PARTIAL' ? round2(dto.advanceAmount ?? 0) : 0;
+      if (paymentTerm === 'ADVANCE_PARTIAL' && !(advanceAmount > 0 && advanceAmount < totalAmount))
+        throw new BadRequestException(`Enter the advance: more than ₹0 and less than the PO total of ₹${totalAmount}`);
+      if (id) {
+        // An advance already paid can't be undone by an edit
+        const paidSoFar = num((await tx.purchaseOrder.findUnique({ where: { id }, select: { advancePaid: true } }))?.advancePaid);
+        if (paidSoFar > advanceAmount + 0.004)
+          throw new BadRequestException(`₹${paidSoFar} has already been paid in advance on this PO — the advance can't be less than that`);
+      }
       const chain = await this.approvals.chainFor(totalAmount, tx);
       // Same state as the delivery branch: CGST + SGST; vendor GSTIN from another state: IGST only
       const deliveryBranch =
@@ -721,6 +802,8 @@ export class ProcurementService {
         isInterState: interState,
         ...splitGst(taxAmount, interState),
         totalAmount,
+        paymentTerm,
+        advanceAmount,
       };
       const itemRows = lines.map(({ taxable: _t, ...l }) => l);
 
@@ -887,6 +970,21 @@ export class ProcurementService {
             where: { id },
             data: { status: 'APPROVED', level },
           });
+          // Advance terms: Finance pays the advance against the PO now
+          const advanceDue = round2(num(po.advanceAmount) - num(po.advancePaid));
+          if (po.paymentTerm !== 'AFTER_GRN' && advanceDue > 0) {
+            const vendor = await tx.vendor.findUnique({ where: { id: po.vendorId }, select: { name: true } });
+            await this.notifyFinance(
+              {
+                type: 'WARNING',
+                title: `Advance to pay: ${po.poNo} · ₹${advanceDue}`,
+                message: `${po.paymentTerm === 'ADVANCE_FULL' ? '100% advance' : 'Partial advance'} to ${vendor?.name ?? 'the vendor'} — record the payment against the PO`,
+                module: 'Payments',
+                link: '/payments?tab=pending',
+              },
+              tx,
+            );
+          }
           await this.notifications.toPermitted(
             ['purchases.receive'],
             {
@@ -1126,6 +1224,9 @@ export class ProcurementService {
           damagedQty: i.damagedQty,
           expiredQty: i.expiredQty,
           batchNo: i.batchNo ?? null,
+          // Not accepted: why, as noted at inward
+          issue: i.issueReason ? GRN_ISSUE_LABEL[i.issueReason] : null,
+          issueRemark: i.issueRemark ?? null,
         })),
         chain: chain.map((c, i) => ({
           ...c,
@@ -1448,6 +1549,9 @@ export class ProcurementService {
    * then waits for the approval chain of the PO's value. The last approval posts it (see decideGrn).
    */
   async createGrn(poId: string, dto: CreateGrnDto, user: AuthUser, currentBranch: string | null = null) {
+    // GRN approval is switched off for now: goods inward is posted straight away (stock, invoice, debit notes).
+    // Set GRN_APPROVAL to true to send it through the L1 → L2 → L3 chain again.
+    if (!GRN_APPROVAL) return this.postGrn(poId, dto, user, currentBranch, { reserved: await this.reservedForGrn(poId) });
     const po = await this.prisma.purchaseOrder.findUniqueOrThrow({ where: { id: poId, deletedAt: null }, select: { poNo: true, round: true, totalAmount: true } });
     // Quantities already waiting on other approvals can't be received twice
     const reserved = await this.reservedForGrn(poId);
@@ -1538,16 +1642,22 @@ export class ProcurementService {
         },
       });
 
-      const rejected: {
+      // Everything not accepted (rejected, damaged, leaking, expired), with why: one draft debit note for the vendor
+      const notAccepted: {
         productId: string;
         quantity: number;
         rate: number;
         gstRate: number;
+        batchNo: string | null;
+        description: string;
+        label: string;
       }[] = [];
       const summary: string[] = [];
       const qty = { passed: 0, rejected: 0, damaged: 0, expired: 0 };
       // A PO line may arrive split over several batches: count what earlier rows of this GRN already took
       const usedByLine = new Map<string, number>();
+      // What this GRN adds to each PO line's received / rejected / damaged / expired totals
+      const lineTotals = new Map<string, { passedQty: number; rejectedQty: number; damagedQty: number; expiredQty: number }>();
       // Serials typed on earlier rows of this GRN, per product: one unit can't arrive twice
       const serialsSeen = new Map<string, Set<string>>();
       for (const r of rows) {
@@ -1565,7 +1675,8 @@ export class ProcurementService {
         usedByLine.set(line.id, round3((usedByLine.get(line.id) ?? 0) + total));
         const batchNo = r.batchNo?.trim();
         // Every batch taken into stock carries its own batch number, Mfg date and expiry date
-        if ((r.passedQty > 0 || (p.trackBatch && r.expiredQty > 0)) && !batchNo) {
+        // Not-accepted goods (damaged, leaking, expired) don't go into stock, so they need no batch
+        if (r.passedQty > 0 && !batchNo) {
           throw new BadRequestException(`${p.name}: enter the batch number`);
         }
         if (r.passedQty > 0 && !r.mfgDate) {
@@ -1594,6 +1705,15 @@ export class ProcurementService {
           }
           serialsSeen.set(p.id, seen);
         }
+
+        const notOk = round3(r.rejectedQty + r.damagedQty + r.expiredQty);
+        // Reason for what was not accepted: as chosen, else from which quantity it was entered under
+        const issueReason: GrnIssue | null =
+          notOk > 0 ? (r.issueReason ?? (r.expiredQty > 0 ? 'EXPIRED' : r.damagedQty > 0 ? 'DAMAGED' : 'QUALITY')) : null;
+        const issueRemark = notOk > 0 ? r.issueRemark?.trim() || null : null;
+        if (issueReason === 'OTHER' && !issueRemark) throw new BadRequestException(`${p.name}: say what was wrong with the ${notOk} not accepted`);
+        // Which batch / unit was not accepted is part of the claim to the vendor
+        if (notOk > 0 && !batchNo) throw new BadRequestException(`${p.name}: enter the batch no. of the ${notOk} not accepted`);
 
         let batchId: string | null = null;
         if (r.passedQty > 0) {
@@ -1632,34 +1752,49 @@ export class ProcurementService {
             expiryDate: expiry,
             batchId,
             rate: line.rate,
+            issueReason,
+            issueRemark,
           },
         });
-        await tx.purchaseOrderItem.update({
-          where: { id: line.id },
-          data: {
-            passedQty: { increment: r.passedQty },
-            rejectedQty: { increment: r.rejectedQty },
-            damagedQty: { increment: r.damagedQty },
-            expiredQty: { increment: r.expiredQty },
-          },
-        });
+        // Added up per PO line and written once after the rows (one round trip per line, not per row)
+        const add = lineTotals.get(line.id) ?? { passedQty: 0, rejectedQty: 0, damagedQty: 0, expiredQty: 0 };
+        add.passedQty = round3(add.passedQty + r.passedQty);
+        add.rejectedQty = round3(add.rejectedQty + r.rejectedQty);
+        add.damagedQty = round3(add.damagedQty + r.damagedQty);
+        add.expiredQty = round3(add.expiredQty + r.expiredQty);
+        lineTotals.set(line.id, add);
         qty.passed += r.passedQty;
         qty.rejected += r.rejectedQty;
         qty.damaged += r.damagedQty;
         qty.expired += r.expiredQty;
-        if (r.rejectedQty > 0)
-          rejected.push({
+        if (notOk > 0 && issueReason) {
+          const label = GRN_ISSUE_LABEL[issueReason];
+          notAccepted.push({
             productId: p.id,
-            quantity: r.rejectedQty,
+            quantity: notOk,
             rate: num(line.rate),
             gstRate: num(line.gstRate),
+            batchNo: batchNo || null,
+            description: issueRemark ? `${label}: ${issueRemark}` : label,
+            label: `${p.name} ${notOk} ${p.unit} (${issueRemark ? `${label} — ${issueRemark}` : label})`,
           });
+        }
         summary.push(
           `${p.name}: ${r.passedQty} passed` +
-            (r.rejectedQty ? `, ${r.rejectedQty} rejected` : '') +
-            (r.damagedQty ? `, ${r.damagedQty} damaged` : '') +
-            (r.expiredQty ? `, ${r.expiredQty} expired` : ''),
+            (notOk ? `, ${notOk} not accepted (${GRN_ISSUE_LABEL[issueReason!]}${issueRemark ? `: ${issueRemark}` : ''})` : ''),
         );
+      }
+
+      for (const [lineId, add] of lineTotals) {
+        await tx.purchaseOrderItem.update({
+          where: { id: lineId },
+          data: {
+            passedQty: { increment: add.passedQty },
+            rejectedQty: { increment: add.rejectedQty },
+            damagedQty: { increment: add.damagedQty },
+            expiredQty: { increment: add.expiredQty },
+          },
+        });
       }
 
       // Accepted stock is on the books at the PO rate until the vendor's bill is booked
@@ -1724,8 +1859,8 @@ export class ProcurementService {
       );
 
       let dnNo: string | null = null;
-      if (rejected.length) {
-        const lines = rejected.map((l) => {
+      if (notAccepted.length) {
+        const lines = notAccepted.map(({ label: _l, ...l }) => {
           const subtotal = round2(l.quantity * l.rate);
           return {
             ...l,
@@ -1741,9 +1876,13 @@ export class ProcurementService {
             vendorId: po.vendorId,
             grnId: grn.id,
             poId,
-            reasonType: 'REJECTED_AT_INWARD',
+            // Only damaged / leaking goods: damaged in transit; anything else in it: rejected at inward
+            reasonType: notAccepted.every((l) => /^(Damaged in transit|Leakage)/.test(l.description)) ? 'DAMAGED_IN_TRANSIT' : 'REJECTED_AT_INWARD',
             branchId,
-            reason: 'Rejected at goods inward',
+            // A claim for the vendor: the bill only covers what was accepted, so stock and the payable are untouched
+            affectsStock: false,
+            affectsBalance: false,
+            reason: `Not accepted at inward on ${grnNo}: ${notAccepted.map((l) => l.label).join(', ')}`,
             subtotal,
             taxAmount: round2(totalAmount - subtotal),
             totalAmount,
@@ -1756,7 +1895,7 @@ export class ProcurementService {
           ['notes.create'],
           {
             type: 'INFO',
-            title: `${grnNo}: rejected goods moved to debit note ${dn.dnNo}`,
+            title: `${grnNo}: goods not accepted noted on debit note ${dn.dnNo}`,
             module: 'Goods Inward',
             link: '/debit-notes',
           },
@@ -1804,7 +1943,7 @@ export class ProcurementService {
       // Everything checked: undo it all
       if (opts.dryRun) throw DRY_RUN;
       return { grn: { ...grn, shortNoteNo }, sms: { phone: po.vendor.phone, text } };
-    }, TX_OPTIONS);
+    }, LONG_TX_OPTIONS);
     // Sent after commit; never throws, so an SMS failure can't undo the GRN
     this.sms.notify(sms.phone, sms.text, `GRN ${grn.grnNo} SMS`);
     // A posted GRN books its purchase invoice straight away; if that fails the GRN stands and can be invoiced by hand
@@ -1987,6 +2126,8 @@ export class ProcurementService {
           userId: user.id,
         });
       }
+      // The PO's advance is set against this bill (after anything paid with it); Finance is told what is left to pay
+      await this.applyAdvanceAndNotify(tx, purchase.id);
       if (rateMismatch) {
         await this.notifications.toPermitted(
           ['invoices.create'],
@@ -2009,7 +2150,7 @@ export class ProcurementService {
         tx,
       );
       return purchase;
-    }, TX_OPTIONS);
+    }, LONG_TX_OPTIONS);
   }
 
   // ───── Debit notes ─────

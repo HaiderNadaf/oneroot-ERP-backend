@@ -18,6 +18,13 @@ enum Role {
   ACCOUNTANT
 }
 
+/// When a PO is paid: all in advance, part in advance (balance after goods inward), or after goods inward
+enum PoPaymentTerm {
+  AFTER_GRN
+  ADVANCE_FULL
+  ADVANCE_PARTIAL
+}
+
 /// Seniority of a role inside its department: L1 (entry) up to L3 (senior)
 enum RoleLevel {
   L1
@@ -816,6 +823,14 @@ model PurchaseOrder {
   updatedAt             DateTime            @updatedAt
   /// Soft delete: set the day after an open PO expires (orderDate + expiryDays); hidden everywhere once set
   deletedAt             DateTime?
+  /// Payment terms: after goods inward (default), 100% advance, or a partial advance with the balance after goods inward
+  paymentTerm           PoPaymentTerm       @default(AFTER_GRN)
+  /// Advance to pay before delivery: the PO total for 100% advance, the amount entered for a partial advance, else 0
+  advanceAmount         Decimal             @default(0) @db.Decimal(14, 2)
+  /// Advance paid so far (payments recorded against this PO)
+  advancePaid           Decimal             @default(0) @db.Decimal(14, 2)
+  /// Part of the advance already set against the PO's invoices (booked from its GRNs)
+  advanceApplied        Decimal             @default(0) @db.Decimal(14, 2)
 
   items        PurchaseOrderItem[]
   purchases    Purchase[]
@@ -823,6 +838,7 @@ model PurchaseOrder {
   grns         Grn[]
   grnApprovals GrnApproval[]
   debitNotes   DebitNote[]
+  payments     Payment[]
 
   branchId String?
   branch   Branch? @relation(fields: [branchId], references: [id])
@@ -909,6 +925,7 @@ model Grn {
   purchase   Purchase?
   debitNotes DebitNote[]
   approval   GrnApproval?
+  payments   Payment[]
 
   branchId String?
   branch   Branch? @relation(fields: [branchId], references: [id])
@@ -961,6 +978,10 @@ model GrnItem {
   batchId     String?
   /// PO rate excl. GST
   rate        Decimal           @db.Decimal(12, 2)
+  /// Why goods on this line were not accepted: DAMAGED, LEAKAGE, EXPIRED, QUALITY or OTHER
+  issueReason String?
+  /// What was wrong, as noted at inward (e.g. "2 bottles leaking, box crushed")
+  issueRemark String?
 }
 
 /// Purchase return / debit note to a vendor
@@ -1261,6 +1282,12 @@ model Payment {
   sale        Sale?            @relation(fields: [saleId], references: [id])
   purchaseId  String?
   purchase    Purchase?        @relation(fields: [purchaseId], references: [id])
+  /// Advance paid against a PO before its goods arrive (set against the PO's invoice once booked)
+  poId        String?
+  po          PurchaseOrder?   @relation(fields: [poId], references: [id])
+  /// Paid against the goods received on this GRN (through its invoice)
+  grnId       String?
+  grn         Grn?             @relation(fields: [grnId], references: [id])
   amount      Decimal          @db.Decimal(14, 2)
   mode        PaymentMode      @default(CASH)
   reference   String? // UPI txn id, cheque no.
@@ -1280,6 +1307,8 @@ model Payment {
   @@index([customerId])
   @@index([vendorId])
   @@index([direction, paymentDate])
+  @@index([poId])
+  @@index([grnId])
 }
 
 model ExpenseCategory {

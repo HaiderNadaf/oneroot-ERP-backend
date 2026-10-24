@@ -146,3 +146,8 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 
 /** Interactive transaction options — a remote DB needs more than the 5s default */
 export const TX_OPTIONS = { maxWait: 10_000, timeout: 30_000 };
+/**
+ * Goods inward and invoice booking: several queries per received row (batch, stock movement, serials, GRN line),
+ * each a round trip of ~0.3 s to the database, so a delivery of many serial-numbered units can run well past 30 s.
+ */
+export const LONG_TX_OPTIONS = { maxWait: 15_000, timeout: 180_000 };

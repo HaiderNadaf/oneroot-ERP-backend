@@ -92,7 +92,6 @@ export const PERMISSIONS = [
   { key: 'users.create', section: 'Administration', module: 'Users', action: 'create', label: 'Add users', roles: [] },
   { key: 'users.edit', section: 'Administration', module: 'Users', action: 'edit', label: 'Edit users, reset passwords, enable / disable', roles: [] },
   { key: 'users.delete', section: 'Administration', module: 'Users', action: 'delete', label: 'Delete users (ones with history are made inactive)', roles: [] },
-  { key: 'users.delete', section: 'Administration', module: 'Users', action: 'delete', label: 'Delete users — not in use yet', roles: [], planned: true },
   { key: 'admin.roles', section: 'Administration', module: 'Roles & Departments', action: 'view', label: 'Roles, departments and limits', roles: [] },
   { key: 'roles.create', section: 'Administration', module: 'Roles & Departments', action: 'create', label: 'Add roles and departments', roles: [] },
   { key: 'roles.edit', section: 'Administration', module: 'Roles & Departments', action: 'edit', label: 'Edit roles, departments and authority limits', roles: [] },

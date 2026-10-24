@@ -104,11 +104,12 @@ export class InventoryService {
     return paged(items, total, p);
   }
 
-  async movements(q: Paging & { productId?: string; type?: string; from?: string; to?: string }, branchId: string | null = null) {
+  async movements(q: Paging & { productId?: string; batchId?: string; type?: string; from?: string; to?: string }, branchId: string | null = null) {
     const p = paging(q);
     const where: Prisma.StockMovementWhereInput = {
       branchId: branchId ?? undefined,
       productId: q.productId || undefined,
+      batchId: q.batchId || undefined,
       type: (q.type as StockMovementType) || undefined,
       createdAt: dateRange(q.from, q.to),
     };

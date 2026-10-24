@@ -62,7 +62,7 @@ const publicFields = {
   designation: true,
   role: true,
   roleTemplateId: true,
-  roleTemplate: { select: { id: true, name: true, baseRole: true, department: { select: { id: true, code: true, name: true } } } },
+  roleTemplate: { select: { id: true, name: true, baseRole: true, level: true, department: { select: { id: true, code: true, name: true } } } },
   permissions: true,
   extraPermissions: true,
   revokedPermissions: true,

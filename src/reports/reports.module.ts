@@ -17,6 +17,18 @@ function bounds(q: Range) {
   return { from, to };
 }
 
+/** Local time zone for month / day grouping (same as the dashboard) */
+const APP_TZ = process.env.APP_TIMEZONE ?? 'Asia/Kolkata';
+
+/** PO = purchase orders (submitted onwards, value incl. GST); GRN = goods received (passed qty x PO rate after discount, excl. GST) */
+type PurchaseKind = 'po' | 'grn';
+const kindOf = (k?: string): PurchaseKind => (k === 'grn' ? 'grn' : 'po');
+
+/** POs that count: submitted or further, not drafts, rejected, cancelled or expired-and-removed ones */
+const PO_COUNTS = Prisma.sql`po."deletedAt" IS NULL AND po.status NOT IN ('DRAFT', 'REJECTED', 'CANCELLED')`;
+/** Received value of a GRN line: passed quantity at the PO rate after the line discount, excl. GST */
+const GRN_VALUE = Prisma.sql`gi."passedQty" * gi.rate * (1 - pi."discountPct" / 100)`;
+
 /** `AND <alias>."branchId" = …` when a branch is selected */
 const andBranch = (alias: string, branchId: string | null) =>
   branchId ? Prisma.sql`AND ${Prisma.raw(alias)}."branchId" = ${branchId}` : Prisma.empty;
@@ -223,6 +235,134 @@ export class ReportsService {
     };
   }
 
+  /** Purchase orders or goods received in a period: totals, and the same split by product and by vendor */
+  async purchaseAnalytics(q: Range & { kind?: string }, branchId: string | null = null) {
+    const kind = kindOf(q.kind);
+    const { from, to } = bounds(q);
+    type Raw = { id: string; name: string; unit?: string; quantity: string | null; value: string | null; count: bigint };
+    const [byProduct, byVendor] =
+      kind === 'po'
+        ? await Promise.all([
+            this.prisma.$queryRaw<Raw[]>`
+              SELECT p.id, p.name, p.unit, SUM(pi.quantity) AS quantity, SUM(pi.amount) AS value, COUNT(DISTINCT po.id) AS count
+              FROM "PurchaseOrderItem" pi JOIN "PurchaseOrder" po ON po.id = pi."poId" JOIN "Product" p ON p.id = pi."productId"
+              WHERE ${PO_COUNTS} AND po."orderDate" BETWEEN ${from} AND ${to} ${andBranch('po', branchId)}
+              GROUP BY p.id, p.name, p.unit ORDER BY value DESC`,
+            this.prisma.$queryRaw<Raw[]>`
+              SELECT v.id, v.name, NULL AS quantity, SUM(po."totalAmount") AS value, COUNT(*) AS count
+              FROM "PurchaseOrder" po JOIN "Vendor" v ON v.id = po."vendorId"
+              WHERE ${PO_COUNTS} AND po."orderDate" BETWEEN ${from} AND ${to} ${andBranch('po', branchId)}
+              GROUP BY v.id, v.name ORDER BY value DESC`,
+          ])
+        : await Promise.all([
+            this.prisma.$queryRaw<Raw[]>`
+              SELECT p.id, p.name, p.unit, SUM(gi."passedQty") AS quantity, SUM(${GRN_VALUE}) AS value, COUNT(DISTINCT g.id) AS count
+              FROM "GrnItem" gi JOIN "Grn" g ON g.id = gi."grnId" JOIN "PurchaseOrderItem" pi ON pi.id = gi."poItemId" JOIN "Product" p ON p.id = gi."productId"
+              WHERE g."receivedAt" BETWEEN ${from} AND ${to} ${andBranch('g', branchId)}
+              GROUP BY p.id, p.name, p.unit ORDER BY value DESC`,
+            this.prisma.$queryRaw<Raw[]>`
+              SELECT v.id, v.name, SUM(gi."passedQty") AS quantity, SUM(${GRN_VALUE}) AS value, COUNT(DISTINCT g.id) AS count
+              FROM "GrnItem" gi JOIN "Grn" g ON g.id = gi."grnId" JOIN "PurchaseOrderItem" pi ON pi.id = gi."poItemId" JOIN "Vendor" v ON v.id = g."vendorId"
+              WHERE g."receivedAt" BETWEEN ${from} AND ${to} ${andBranch('g', branchId)}
+              GROUP BY v.id, v.name ORDER BY value DESC`,
+          ]);
+    const shape = (r: Raw): PurchaseAnalyticsRow => ({
+      id: r.id,
+      name: r.name,
+      ...(r.unit ? { unit: r.unit } : {}),
+      quantity: num(r.quantity),
+      value: round2(num(r.value)),
+      count: Number(r.count),
+    });
+    const vendors = byVendor.map(shape);
+    return {
+      kind,
+      from,
+      to,
+      totals: {
+        value: round2(vendors.reduce((t, v) => t + v.value, 0)),
+        // A document has one vendor, so the vendor counts add up to the number of POs / GRNs
+        count: vendors.reduce((t, v) => t + v.count, 0),
+        vendors: vendors.length,
+        products: byProduct.length,
+      },
+      byProduct: byProduct.map(shape),
+      byVendor: vendors,
+    };
+  }
+
+  /**
+   * Month by month (last 12, local time) and this month against last month day by day (running totals),
+   * for purchase orders or goods received.
+   */
+  async purchaseTrend(q: { kind?: string }, branchId: string | null = null) {
+    const kind = kindOf(q.kind);
+    // Wide enough for 12 local months; rows are grouped by their local date below
+    const since = new Date(Date.now() - 400 * 86_400_000);
+    const docs =
+      kind === 'po'
+        ? Prisma.sql`
+            SELECT po.id, (po."orderDate" AT TIME ZONE 'UTC') AT TIME ZONE ${APP_TZ} AS at, po."totalAmount" AS v
+            FROM "PurchaseOrder" po WHERE ${PO_COUNTS} AND po."orderDate" >= ${since} ${andBranch('po', branchId)}`
+        : Prisma.sql`
+            SELECT g.id, (g."receivedAt" AT TIME ZONE 'UTC') AT TIME ZONE ${APP_TZ} AS at, SUM(${GRN_VALUE}) AS v
+            FROM "Grn" g JOIN "GrnItem" gi ON gi."grnId" = g.id JOIN "PurchaseOrderItem" pi ON pi.id = gi."poItemId"
+            WHERE g."receivedAt" >= ${since} ${andBranch('g', branchId)} GROUP BY g.id`;
+    const [months, days] = await Promise.all([
+      this.prisma.$queryRaw<{ month: string; value: string; count: bigint }[]>`
+        WITH docs AS (${docs}), m AS (
+          SELECT to_char(d, 'YYYY-MM') AS month FROM generate_series(
+            date_trunc('month', now() AT TIME ZONE ${APP_TZ}) - interval '11 months',
+            date_trunc('month', now() AT TIME ZONE ${APP_TZ}),
+            interval '1 month') d
+        )
+        SELECT m.month, COALESCE(SUM(docs.v), 0) AS value, COUNT(docs.id) AS count
+        FROM m LEFT JOIN docs ON to_char(docs.at, 'YYYY-MM') = m.month
+        GROUP BY m.month ORDER BY m.month`,
+      this.prisma.$queryRaw<{ day: string; value: string; count: bigint }[]>`
+        WITH docs AS (${docs})
+        SELECT to_char(at, 'YYYY-MM-DD') AS day, SUM(v) AS value, COUNT(*) AS count FROM docs
+        WHERE at >= date_trunc('month', now() AT TIME ZONE ${APP_TZ}) - interval '1 month'
+        GROUP BY 1`,
+    ]);
+
+    // This month and last month, as local YYYY-MM
+    const todayLocal = new Date().toLocaleDateString('en-CA', { timeZone: APP_TZ });
+    const [y, mo, d] = todayLocal.split('-').map(Number);
+    const key = (yy: number, mm: number) => `${yy}-${String(mm).padStart(2, '0')}`;
+    const cur = key(y, mo);
+    const prev = mo === 1 ? key(y - 1, 12) : key(y, mo - 1);
+    const daysIn = (k: string) => new Date(Number(k.slice(0, 4)), Number(k.slice(5, 7)), 0).getDate();
+    const byDay = new Map(days.map((r) => [r.day, num(r.value)]));
+    // Running totals: last month runs to its end, this month stops at today
+    let runCur = 0;
+    let runPrev = 0;
+    const daily = Array.from({ length: Math.max(daysIn(cur), daysIn(prev)) }, (_, i) => {
+      const dd = String(i + 1).padStart(2, '0');
+      if (i < daysIn(prev)) runPrev += byDay.get(`${prev}-${dd}`) ?? 0;
+      if (i < d) runCur += byDay.get(`${cur}-${dd}`) ?? 0;
+      return {
+        day: i + 1,
+        previous: i < daysIn(prev) ? round2(runPrev) : null,
+        current: i < d ? round2(runCur) : null,
+      };
+    });
+    const month = (k: string) => {
+      const r = months.find((x) => x.month === k);
+      return { month: k, value: round2(num(r?.value)), count: Number(r?.count ?? 0) };
+    };
+    // Last month up to the same day, for a like-for-like comparison mid-month
+    const prevToDate = daily[Math.min(d, daysIn(prev)) - 1]?.previous ?? 0;
+    return {
+      kind,
+      months: months.map((r) => ({ month: r.month, value: round2(num(r.value)), count: Number(r.count) })),
+      current: month(cur),
+      previous: { ...month(prev), toDate: round2(prevToDate) },
+      today: d,
+      daily,
+    };
+  }
+
   async productSales(q: Range, branchId: string | null = null) {
     const { from, to } = bounds(q);
     const rows = await this.prisma.$queryRaw<
@@ -355,6 +495,15 @@ export class ReportsService {
   }
 }
 
+export interface PurchaseAnalyticsRow {
+  id: string;
+  name: string;
+  unit?: string;
+  quantity: number;
+  value: number;
+  count: number;
+}
+
 function roundAll<T extends Record<string, number>>(o: T): T {
   return Object.fromEntries(Object.entries(o).map(([k, v]) => [k, round2(v)])) as T;
 }
@@ -392,6 +541,18 @@ export class ReportsController {
   @Get('product-sales')
   productSales(@Query() q: Range, @BranchId() branchId: string | null) {
     return this.reports.productSales(q, branchId);
+  }
+
+  /** ?kind=po|grn: totals, by product and by vendor for the period */
+  @Get('purchase-analytics')
+  purchaseAnalytics(@Query() q: Range & { kind?: string }, @BranchId() branchId: string | null) {
+    return this.reports.purchaseAnalytics(q, branchId);
+  }
+
+  /** ?kind=po|grn: last 12 months, and this month against last month day by day */
+  @Get('purchase-trend')
+  purchaseTrend(@Query() q: { kind?: string }, @BranchId() branchId: string | null) {
+    return this.reports.purchaseTrend(q, branchId);
   }
 
   @Get('outstanding')

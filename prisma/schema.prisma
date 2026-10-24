@@ -204,6 +204,7 @@ model User {
   createdPos       PurchaseOrder[]   @relation("PoCreatedBy")
   agentsDeleted    Agent[]           @relation("AgentDeletedBy")
   grns             Grn[]
+  grnApprovals     GrnApproval[]
   shiftsOpened     Shift[]           @relation("ShiftOpenedBy")
   approvalsAsked   ApprovalRequest[] @relation("ApprovalRequestedBy")
   approvalsDecided ApprovalRequest[] @relation("ApprovalDecidedBy")
@@ -816,11 +817,12 @@ model PurchaseOrder {
   /// Soft delete: set the day after an open PO expires (orderDate + expiryDays); hidden everywhere once set
   deletedAt             DateTime?
 
-  items      PurchaseOrderItem[]
-  purchases  Purchase[]
-  history    PoHistory[]
-  grns       Grn[]
-  debitNotes DebitNote[]
+  items        PurchaseOrderItem[]
+  purchases    Purchase[]
+  history      PoHistory[]
+  grns         Grn[]
+  grnApprovals GrnApproval[]
+  debitNotes   DebitNote[]
 
   branchId String?
   branch   Branch? @relation(fields: [branchId], references: [id])
@@ -856,9 +858,11 @@ model ApprovalStep {
 
 /// POs with total up to `upTo` (null = no limit) need the first `steps` approval steps
 model ApprovalBand {
-  id    String   @id @default(cuid())
-  upTo  Decimal? @db.Decimal(14, 2)
+  id    String     @id @default(cuid())
+  upTo  Decimal?   @db.Decimal(14, 2)
   steps Int
+  /// Highest role level ticked for the band (L2 includes L1, L3 includes L1 and L2); null = none ticked
+  level RoleLevel?
 }
 
 model PurchaseOrderItem {
@@ -904,12 +908,39 @@ model Grn {
   items      GrnItem[]
   purchase   Purchase?
   debitNotes DebitNote[]
+  approval   GrnApproval?
 
   branchId String?
   branch   Branch? @relation(fields: [branchId], references: [id])
 
   @@index([poId])
   @@index([receivedAt])
+}
+
+/// Goods inward waiting for approval: the form as entered, posted as a GRN (stock, accounts, notes) once the last level approves
+model GrnApproval {
+  id            String         @id @default(cuid())
+  poId          String
+  po            PurchaseOrder  @relation(fields: [poId], references: [id])
+  /// The goods-inward form exactly as submitted
+  payload       Json
+  requestedById String
+  requestedBy   User           @relation(fields: [requestedById], references: [id])
+  status        ApprovalStatus @default(PENDING)
+  /// Index of the approval step currently waiting (0-based)
+  level         Int            @default(0)
+  /// Snapshot of the chain (from the PO's value) taken when it was submitted
+  approvalChain Json
+  /// Who approved / rejected each step: [{ action, by, at, note }]
+  history       Json           @default("[]")
+  /// The GRN posted on final approval
+  grnId         String?        @unique
+  grn           Grn?           @relation(fields: [grnId], references: [id])
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([status])
+  @@index([poId])
 }
 
 model GrnItem {

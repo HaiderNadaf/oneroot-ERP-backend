@@ -9,8 +9,8 @@ export interface AuthUser {
   role: Role;
   /** What this user may do (see permissions.ts); administrators may do everything */
   permissions: string[];
-  /** Custom role name, when the user was given one */
-  roleTemplate?: { name: string } | null;
+  /** Custom role name (and its level, for approvals), when the user was given one */
+  roleTemplate?: { name: string; level?: 'L1' | 'L2' | 'L3' } | null;
   /** Home branch; null = may work in every branch */
   branchId: string | null;
   /** Branches the user may work in; empty = all */

@@ -46,7 +46,7 @@ export class AuthGuard implements CanActivate {
     const user = await userCache.getOrLoad(payload.sub, () =>
       this.prisma.user.findUnique({
         where: { id: payload.sub },
-        select: { id: true, email: true, name: true, role: true, permissions: true, isActive: true, branchId: true, branchIds: true, roleTemplate: { select: { name: true } } },
+        select: { id: true, email: true, name: true, role: true, permissions: true, isActive: true, branchId: true, branchIds: true, roleTemplate: { select: { name: true, level: true } } },
       }),
     );
     if (!user || !user.isActive) throw new UnauthorizedException('Account disabled');

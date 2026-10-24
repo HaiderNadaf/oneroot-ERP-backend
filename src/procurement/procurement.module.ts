@@ -59,6 +59,7 @@ import {
   NoteType,
   PaymentMode,
   PurchaseOrderStatus,
+  RoleLevel,
 } from '../generated/prisma/enums.js';
 import { StockService } from '../inventory/stock.service.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
@@ -71,6 +72,8 @@ import { ApprovalsService, type ChainStep } from './approvals.service.js';
 import { PoExpiryService } from './po-expiry.service.js';
 
 type Tx = Prisma.TransactionClient;
+/** Thrown at the end of a goods-inward dry run so its transaction rolls back */
+const DRY_RUN = Symbol('grn-dry-run');
 
 // ───────────────────────── DTOs ─────────────────────────
 
@@ -116,6 +119,11 @@ class SavePoDto {
   @IsOptional() @IsString() otherChargesNote?: string;
   /** true = submit for approval, false = save as draft */
   @IsBoolean() submit: boolean;
+}
+
+class GrnDecisionDto {
+  @IsIn(['approve', 'reject']) action: 'approve' | 'reject';
+  @IsOptional() @IsString() note?: string;
 }
 
 class BulkApproveDto {
@@ -229,23 +237,14 @@ class ShipToDto {
   @IsOptional() @IsString() @MaxLength(500) shipTo?: string;
 }
 
-class ApprovalStepDto {
-  @IsString() title: string;
-  @IsOptional() @IsString() approverId?: string | null;
-}
-
 class ApprovalBandDto {
   @IsOptional() @Type(() => Number) @IsNumber() @IsPositive() upTo:
     number | null;
-  @Type(() => Number) @IsInt() @Min(1) steps: number;
+  /** Highest level ticked: L1, L2 (= L1 → L2) or L3 (= L1 → L2 → L3) */
+  @IsEnum(RoleLevel, { message: 'Tick at least L1 on every value band' }) level: RoleLevel;
 }
 
 class ApprovalConfigDto {
-  @IsArray()
-  @ArrayMinSize(1)
-  @ValidateNested({ each: true })
-  @Type(() => ApprovalStepDto)
-  steps: ApprovalStepDto[];
   @IsArray()
   @ArrayMinSize(1)
   @ValidateNested({ each: true })
@@ -1061,11 +1060,11 @@ export class ProcurementService {
     );
     // Buyers and approvers see the whole queue; anyone else only the POs that name them as an approver
     const full = hasPerm(user, 'purchases.view', 'purchases.approve');
-    const visible = full ? rows : rows.filter((r) => r.chain.some((c) => c.approverId === user.id));
+    const visible = full ? rows : rows.filter((r) => r.canAct || r.chain.some((c) => c.approverId === user.id));
     const visibleIds = new Set(visible.map((r) => r.id));
     const byStep = config.steps.map((s) => ({
       title: s.title,
-      approverName: s.approver?.name ?? null,
+      approverName: s.approverName,
       waiting: visible.filter((r) => r.waitingFor?.order === s.order).length,
     }));
     return {
@@ -1091,7 +1090,111 @@ export class ProcurementService {
     for (const po of pending)
       if (this.approvals.canAct(user, (await this.chainOf(po))[po.level]))
         mine++;
-    return { mine };
+    // Goods inward waiting at this user's level
+    const grns = await this.prisma.grnApproval.findMany({ where: { status: 'PENDING' }, select: { level: true, approvalChain: true } });
+    const grnMine = grns.filter((g) => this.approvals.canAct(user, (g.approvalChain as unknown as ChainStep[])[g.level])).length;
+    return { mine: mine + grnMine, grn: grnMine };
+  }
+
+  /** Goods inward waiting for approval (with where each stands) and the latest decisions */
+  async grnApprovalQueue(user: AuthUser) {
+    const rows = await this.prisma.grnApproval.findMany({
+      where: { OR: [{ status: 'PENDING' }, { updatedAt: { gte: new Date(Date.now() - 30 * 86_400_000) } }] },
+      include: {
+        po: { select: { id: true, poNo: true, totalAmount: true, vendor: { select: { id: true, name: true } }, branch: { select: { name: true } }, items: { select: { id: true, product: { select: { name: true, unit: true } } } } } },
+        requestedBy: { select: { name: true } },
+        grn: { select: { id: true, grnNo: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+    const view = rows.map(({ payload, approvalChain, ...r }) => {
+      const dto = payload as unknown as CreateGrnDto;
+      const chain = approvalChain as unknown as ChainStep[];
+      const names = new Map(r.po.items.map((i) => [i.id, i.product]));
+      return {
+        ...r,
+        supplierInvoiceNo: dto.supplierInvoiceNo,
+        vehicleNo: dto.vehicleNo ?? null,
+        receivedAt: dto.receivedAt ?? r.createdAt,
+        notes: dto.notes ?? null,
+        items: (dto.items ?? []).map((i) => ({
+          product: names.get(i.poItemId)?.name ?? 'Item',
+          unit: names.get(i.poItemId)?.unit ?? '',
+          passedQty: i.passedQty,
+          rejectedQty: i.rejectedQty,
+          damagedQty: i.damagedQty,
+          expiredQty: i.expiredQty,
+          batchNo: i.batchNo ?? null,
+        })),
+        chain: chain.map((c, i) => ({
+          ...c,
+          state:
+            r.status === 'APPROVED' ? 'done'
+            : r.status === 'REJECTED' ? (i < r.level ? 'done' : i === r.level ? 'rejected' : 'pending')
+            : i < r.level ? 'done' : i === r.level ? 'current' : 'pending',
+        })),
+        waitingFor: r.status === 'PENDING' ? chain[r.level] : null,
+        canAct: r.status === 'PENDING' && this.approvals.canAct(user, chain[r.level]),
+      };
+    });
+    // Receivers and approvers see everything; anyone else only what they sent
+    const full = hasPerm(user, 'purchases.approve', 'purchases.view', 'grn.view');
+    const visible = full ? view : view.filter((r) => r.canAct || r.requestedById === user.id);
+    return {
+      pending: visible.filter((r) => r.status === 'PENDING'),
+      decided: visible.filter((r) => r.status !== 'PENDING').slice(0, 20),
+      mine: visible.filter((r) => r.canAct).length,
+    };
+  }
+
+  /** Approve goods inward at the current step (the last approval posts the GRN) or reject it */
+  async decideGrn(id: string, dto: { action: 'approve' | 'reject'; note?: string }, user: AuthUser) {
+    const row = await this.prisma.grnApproval.findUniqueOrThrow({
+      where: { id },
+      include: { po: { select: { poNo: true, round: true } }, requestedBy: { select: { id: true, email: true, name: true, role: true, permissions: true, branchId: true } } },
+    });
+    if (row.status !== 'PENDING') throw new BadRequestException('This goods inward is not waiting for approval');
+    const chain = row.approvalChain as unknown as ChainStep[];
+    const step = chain[row.level];
+    if (!this.approvals.canAct(user, step)) throw new ForbiddenException(`Waiting for ${step?.approverName ?? 'an approver'} (${step?.title})`);
+    const note = dto.note?.trim() || null;
+    if (dto.action === 'reject' && !note) throw new BadRequestException('Give a reason for rejecting');
+    const entry = (action: string) => [...((row.history as unknown as object[]) ?? []), { action, by: user.name, at: new Date().toISOString(), note }] as unknown as Prisma.InputJsonValue;
+    const label = `Goods inward on ${row.po.poNo}`;
+
+    if (dto.action === 'reject') {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.grnApproval.update({ where: { id }, data: { status: 'REJECTED', history: entry(`Rejected · ${step.title}`) } });
+        await this.history(tx, row.poId, row.po.round, `Goods inward rejected · ${step.title}`, user, note);
+        await this.notifications.toUsers([row.requestedById], { type: 'DANGER', title: `${label} rejected`, message: `${user.name}: ${note}`, module: 'GRN Approvals', link: '/purchase-orders/approvals?tab=grn' }, tx);
+      }, TX_OPTIONS);
+      return { status: 'REJECTED' };
+    }
+
+    // Not the last step: move on to the next level
+    if (row.level + 1 < chain.length) {
+      const next = chain[row.level + 1];
+      await this.prisma.$transaction(async (tx) => {
+        await tx.grnApproval.update({ where: { id }, data: { level: row.level + 1, history: entry(`Approved · ${step.title}`) } });
+        await this.history(tx, row.poId, row.po.round, `Goods inward approved · ${step.title}`, user, note);
+        await this.approvals.notifyStep(next, { type: 'WARNING', title: `${label} needs your approval`, message: `Approved by ${user.name} (${step.title}); now waiting for ${next.title}`, module: 'GRN Approvals', link: '/purchase-orders/approvals?tab=grn' }, tx);
+      }, TX_OPTIONS);
+      return { status: 'PENDING', level: row.level + 1 };
+    }
+
+    // Last step: post the GRN as received by whoever entered it, in the same transaction as closing the approval
+    const requester = row.requestedBy as AuthUser;
+    const grn = await this.postGrn(row.poId, row.payload as unknown as CreateGrnDto, requester, null, {
+      reserved: await this.reservedForGrn(row.poId, id),
+      invoiceUser: user,
+      inTx: async (tx, grnId) => {
+        await tx.grnApproval.update({ where: { id }, data: { status: 'APPROVED', level: chain.length, grnId, history: entry(`Approved · ${step.title}`) } });
+        await this.history(tx, row.poId, row.po.round, `Goods inward approved · ${step.title}`, user, note);
+        await this.notifications.toUsers([row.requestedById], { type: 'SUCCESS', title: `${label} approved and posted`, module: 'GRN Approvals', link: `/goods-inward/${grnId}` }, tx);
+      },
+    });
+    return { status: 'APPROVED', grn };
   }
 
   // ───── Goods inward ─────
@@ -1340,7 +1443,62 @@ export class ProcurementService {
     };
   }
 
+  /**
+   * Goods inward is not posted straight away: it is checked exactly as posting would (a dry run, rolled back),
+   * then waits for the approval chain of the PO's value. The last approval posts it (see decideGrn).
+   */
   async createGrn(poId: string, dto: CreateGrnDto, user: AuthUser, currentBranch: string | null = null) {
+    const po = await this.prisma.purchaseOrder.findUniqueOrThrow({ where: { id: poId, deletedAt: null }, select: { poNo: true, round: true, totalAmount: true } });
+    // Quantities already waiting on other approvals can't be received twice
+    const reserved = await this.reservedForGrn(poId);
+    try {
+      await this.postGrn(poId, dto, user, currentBranch, { reserved, dryRun: true });
+    } catch (e) {
+      if (e !== DRY_RUN) throw e;
+    }
+    const chain = await this.approvals.chainFor(num(po.totalAmount));
+    const approval = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.grnApproval.create({
+        data: {
+          poId,
+          payload: dto as unknown as Prisma.InputJsonValue,
+          requestedById: user.id,
+          approvalChain: chain as unknown as Prisma.InputJsonValue,
+          history: [{ action: 'Submitted', by: user.name, at: new Date().toISOString() }],
+        },
+      });
+      await this.history(tx, poId, po.round, 'Goods inward sent for approval', user, chain.map((c) => c.title).join(' → '));
+      await this.approvals.notifyStep(
+        chain[0],
+        { type: 'WARNING', title: `Goods inward on ${po.poNo} needs your approval`, message: `Received by ${user.name}`, module: 'GRN Approvals', link: '/purchase-orders/approvals?tab=grn' },
+        tx,
+      );
+      return row;
+    }, TX_OPTIONS);
+    return { approvalId: approval.id, status: 'PENDING_APPROVAL' as const, chain };
+  }
+
+  /** Per PO line, the quantity on goods inward still waiting for approval (optionally leaving one request out) */
+  private async reservedForGrn(poId: string, exceptId?: string) {
+    const pending = await this.prisma.grnApproval.findMany({ where: { poId, status: 'PENDING', ...(exceptId ? { NOT: { id: exceptId } } : {}) }, select: { payload: true } });
+    const reserved = new Map<string, number>();
+    for (const p of pending)
+      for (const r of (p.payload as unknown as CreateGrnDto).items ?? [])
+        reserved.set(r.poItemId, round3((reserved.get(r.poItemId) ?? 0) + r.passedQty + r.rejectedQty + r.damagedQty + r.expiredQty));
+    return reserved;
+  }
+
+  /**
+   * Posts goods inward as a GRN: stock, serials, accounts, debit notes, PO status. `dryRun` checks everything and
+   * rolls back; `inTx` runs inside the same transaction (marks the approval done); `invoiceUser` books the bill.
+   */
+  private async postGrn(
+    poId: string,
+    dto: CreateGrnDto,
+    user: AuthUser,
+    currentBranch: string | null,
+    opts: { reserved?: Map<string, number>; dryRun?: boolean; inTx?: (tx: Tx, grnId: string) => Promise<unknown>; invoiceUser?: AuthUser } = {},
+  ) {
     const { grn, sms } = await this.prisma.$transaction(async (tx) => {
       const po = await tx.purchaseOrder.findUniqueOrThrow({
         where: { id: poId, deletedAt: null },
@@ -1399,7 +1557,7 @@ export class ProcurementService {
         const total = round3(
           r.passedQty + r.rejectedQty + r.damagedQty + r.expiredQty,
         );
-        const pend = round3(pendingQty(line) - (usedByLine.get(line.id) ?? 0));
+        const pend = round3(pendingQty(line) - (usedByLine.get(line.id) ?? 0) - (opts.reserved?.get(line.id) ?? 0));
         if (total > pend + 0.0005)
           throw new BadRequestException(
             `${p.name}: ${total} is more than the pending ${pend}`,
@@ -1642,6 +1800,9 @@ export class ProcurementService {
       //   '. Thank you.';
       // Twilio trial accounts can only send predefined templates; the body is the template name
       const text = 'sms_delivery_updates';
+      await opts.inTx?.(tx, grn.id);
+      // Everything checked: undo it all
+      if (opts.dryRun) throw DRY_RUN;
       return { grn: { ...grn, shortNoteNo }, sms: { phone: po.vendor.phone, text } };
     }, TX_OPTIONS);
     // Sent after commit; never throws, so an SMS failure can't undo the GRN
@@ -1650,7 +1811,7 @@ export class ProcurementService {
     let purchase: { id: string; purchaseNo: string } | null = null;
     let invoiceError: string | null = null;
     try {
-      purchase = await this.autoInvoice(grn.id, user);
+      purchase = await this.autoInvoice(grn.id, opts.invoiceUser ?? user);
     } catch (e) {
       invoiceError = e instanceof Error ? e.message : 'Could not book the purchase invoice';
       this.logger.warn(`${grn.grnNo}: purchase invoice not booked automatically — ${invoiceError}`);
@@ -2203,6 +2364,17 @@ export class PurchaseOrdersController {
   @Get('approvals/count')
   approvalCount(@CurrentUser() user: AuthUser) {
     return this.svc.myApprovalCount(user);
+  }
+
+  /** Goods inward waiting for approval (any signed-in user; acting is limited by level) */
+  @Get('approvals/grn')
+  grnApprovals(@CurrentUser() user: AuthUser) {
+    return this.svc.grnApprovalQueue(user);
+  }
+
+  @Post('approvals/grn/:approvalId/decision')
+  decideGrn(@Param('approvalId') approvalId: string, @Body() dto: GrnDecisionDto, @CurrentUser() user: AuthUser) {
+    return this.svc.decideGrn(approvalId, dto, user);
   }
 
   /** The next PO number, for the New PO form (it is only taken when the PO is saved). Declared before :id */

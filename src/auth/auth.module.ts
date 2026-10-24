@@ -15,7 +15,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { IsEmail, IsString, MinLength } from 'class-validator';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Public, type AuthUser } from '../common/decorators.js';
+import { AdminOnly, CurrentUser, Public, type AuthUser } from '../common/decorators.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
 class LoginDto {
@@ -95,6 +95,8 @@ export class AuthService implements OnApplicationBootstrap {
     if (!user || !user.isActive || !(await bcrypt.compare(dto.currentPassword, user.passwordHash))) {
       throw new BadRequestException('Email or current password is incorrect');
     }
+    // Only administrators change their own password; staff get theirs reset by an administrator (Users → Edit)
+    if (user.role !== 'ADMIN') throw new BadRequestException('Only administrators can change their password here — ask an administrator to reset yours');
     if (dto.newPassword === dto.currentPassword) throw new BadRequestException('New password must be different from the current one');
     await this.prisma.user.update({
       where: { id: user.id },
@@ -120,6 +122,8 @@ export class AuthController {
     return user;
   }
 
+  /** Administrators only; staff passwords are reset by an administrator from Users */
+  @AdminOnly()
   @Post('change-password')
   changePassword(@CurrentUser() user: AuthUser, @Body() dto: ChangePasswordDto) {
     return this.auth.changePassword(user.id, dto);

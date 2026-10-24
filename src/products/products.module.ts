@@ -36,7 +36,7 @@ import { barcodePng, storeBarcode } from '../common/barcode.js';
 import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
 import { PRODUCT_READ } from '../common/permissions.js';
 import { nextSku, peekSku, withUniqueSku } from '../common/sku.js';
-import { paged, paging, startOfDay, type Paging } from '../common/utils.js';
+import { num, paged, round3, startOfDay, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import { ProductType } from '../generated/prisma/enums.js';
 import { StockService } from '../inventory/stock.service.js';
@@ -209,7 +209,12 @@ export class ProductsService {
     },
     branchId: string | null = null,
   ) {
-    const p = paging(q);
+    // pageSize is optional: left out, every matching product comes back in one page (PO item search);
+    // given, any size is honoured (no upper limit here)
+    const size = Math.floor(Number(q.pageSize));
+    const all = !(size > 0);
+    const page = all ? 1 : Math.max(1, Number(q.page) || 1);
+    const p = { page, pageSize: all ? 0 : size, skip: all ? 0 : (page - 1) * size, take: all ? undefined : size };
     const where: Prisma.ProductWhereInput = {
       type: (q.type as ProductType) || undefined,
       categoryId: q.categoryId || undefined,
@@ -269,6 +274,8 @@ export class ProductsService {
       }),
       this.prisma.product.count({ where }),
     ]);
+    // Everything in one page: its size is the number of products
+    if (all) p.pageSize = Math.max(total, 1);
     const expiry = q.withExpiry === 'true' ? await this.expiryInfo(items.map((i) => i.id), branchId) : null;
     const withExp = <T extends { id: string }>(i: T) =>
       expiry ? { ...i, sellable: expiry.get(i.id)?.sellable ?? 0, nextExpiry: expiry.get(i.id)?.nextExpiry ?? null } : i;
@@ -311,6 +318,74 @@ export class ProductsService {
   }
 
   /** Product with its batches (selected branch only) and a stock breakdown per branch */
+  /**
+   * Every batch of a product with all it is known by: where it came from (GRN / purchase / opening), its rack,
+   * and what happened to it since (received, sold, returned, adjusted, transferred, written off), plus serials.
+   * `all` includes batches with nothing left.
+   */
+  async batchDetails(id: string, q: { all?: string }, branchId: string | null = null) {
+    const all = q.all === 'true' || q.all === '1';
+    const batches = await this.prisma.batch.findMany({
+      where: { productId: id, branchId: branchId ?? undefined, quantity: all ? undefined : { gt: 0 } },
+      include: { branch: { select: { id: true, code: true, name: true } } },
+      orderBy: [{ expiryDate: { sort: 'asc', nulls: 'last' } }, { createdAt: 'asc' }],
+    });
+    const ids = batches.map((b) => b.id);
+    if (!ids.length) return [];
+    const [moves, grnLines, purchaseLines, serials] = await Promise.all([
+      this.prisma.stockMovement.groupBy({ by: ['batchId', 'type'], where: { batchId: { in: ids } }, _sum: { quantity: true }, _max: { createdAt: true } }),
+      this.prisma.grnItem.findMany({
+        where: { batchId: { in: ids } },
+        select: {
+          batchId: true,
+          passedQty: true,
+          grn: { select: { id: true, grnNo: true, receivedAt: true, supplierInvoiceNo: true, vendor: { select: { id: true, name: true } }, po: { select: { id: true, poNo: true } } } },
+        },
+        orderBy: { grn: { receivedAt: 'asc' } },
+      }),
+      this.prisma.purchaseItem.findMany({
+        where: { batchId: { in: ids } },
+        select: { batchId: true, purchase: { select: { id: true, purchaseNo: true, purchaseDate: true, vendor: { select: { id: true, name: true } } } } },
+        orderBy: { purchase: { purchaseDate: 'asc' } },
+      }),
+      this.prisma.serialNumber.groupBy({ by: ['batchId', 'status'], where: { batchId: { in: ids } }, _count: true }),
+    ]);
+
+    return batches.map((b) => {
+      const mine = moves.filter((m) => m.batchId === b.id);
+      const sum = (...types: string[]) => round3(mine.filter((m) => types.includes(m.type)).reduce((t, m) => t + num(m._sum.quantity), 0));
+      const grn = grnLines.find((g) => g.batchId === b.id)?.grn;
+      const purchase = purchaseLines.find((p) => p.batchId === b.id)?.purchase;
+      const opening = mine.some((m) => m.type === 'OPENING');
+      const transferIn = mine.some((m) => m.type === 'TRANSFER_IN');
+      const last = mine.reduce<Date | null>((d, m) => (m._max.createdAt && (!d || m._max.createdAt > d) ? m._max.createdAt : d), null);
+      const mySerials = serials.filter((s) => s.batchId === b.id);
+      return {
+        ...b,
+        source: grn
+          ? { type: 'GRN' as const, id: grn.id, no: grn.grnNo, date: grn.receivedAt, vendor: grn.vendor, po: grn.po, invoiceNo: grn.supplierInvoiceNo }
+          : purchase
+            ? { type: 'PURCHASE' as const, id: purchase.id, no: purchase.purchaseNo, date: purchase.purchaseDate, vendor: purchase.vendor, po: null, invoiceNo: null }
+            : { type: opening ? ('OPENING' as const) : transferIn ? ('TRANSFER' as const) : ('OTHER' as const), id: null, no: null, date: b.createdAt, vendor: null, po: null, invoiceNo: null },
+        // Movements are signed (+ in, − out); shown here as positive amounts
+        received: sum('OPENING', 'PURCHASE'),
+        transferredIn: sum('TRANSFER_IN'),
+        sold: round3(-sum('SALE', 'SALE_RETURN')),
+        returnedToVendor: round3(-sum('PURCHASE_RETURN')),
+        transferredOut: round3(-sum('TRANSFER_OUT')),
+        adjusted: sum('ADJUSTMENT_IN', 'ADJUSTMENT_OUT'),
+        writtenOff: round3(-sum('EXPIRED', 'DAMAGED')),
+        lastMovementAt: last,
+        serials: mySerials.length
+          ? {
+              inStock: mySerials.filter((s) => s.status === 'IN_STOCK').reduce((t, s) => t + s._count, 0),
+              total: mySerials.reduce((t, s) => t + s._count, 0),
+            }
+          : null,
+      };
+    });
+  }
+
   async get(id: string, branchId: string | null = null) {
     const [product, perBranch] = await Promise.all([
       this.prisma.product.findUniqueOrThrow({
@@ -364,6 +439,17 @@ export class ProductsService {
   }
 
 
+  /**
+   * Brand and manufacturer are picked from the vendor list: link the product to those vendors, so it shows up in
+   * their PO item search straight away. Only adds links; ones made on the vendor page are kept.
+   */
+  private async linkMakerVendors(db: Prisma.TransactionClient | PrismaService, productId: string, names: (string | null | undefined)[]) {
+    const wanted = [...new Set(names.map((n) => n?.trim()).filter((n): n is string => !!n))];
+    if (!wanted.length) return;
+    const vendors = await db.vendor.findMany({ where: { OR: wanted.map((name) => ({ name: { equals: name, mode: 'insensitive' as const } })) }, select: { id: true } });
+    if (vendors.length) await db.vendorProduct.createMany({ data: vendors.map((v) => ({ vendorId: v.id, productId })), skipDuplicates: true });
+  }
+
   async create(dto: CreateProductDto, user: AuthUser, branchId: string | null = null) {
     const { openingStock, sku: _typed, ...data } = dto;
     checkMakerFields(data, true);
@@ -403,6 +489,7 @@ export class ProductsService {
         }
         await this.posting.postOpeningStock(tx, product, openingStock.quantity, unitCost, new Date(), branchId, user.id);
       }
+      await this.linkMakerVendors(tx, product.id, [product.brand, product.manufacturer]);
       await this.audit.log(user.id, 'CREATE', 'Product', product.id, { name: product.name, sku, barcode }, tx);
       return tx.product.findUniqueOrThrow({ where: { id: product.id } });
     }, TX_OPTIONS));
@@ -461,6 +548,7 @@ export class ProductsService {
         ...(attributes !== undefined ? { attributes: attributes as Prisma.InputJsonValue } : {}),
       },
     });
+    if (data.brand !== undefined || data.manufacturer !== undefined) await this.linkMakerVendors(this.prisma, id, [product.brand, product.manufacturer]);
     await this.audit.log(user.id, 'UPDATE', 'Product', id, { ...data, location, attributes: attributes as Prisma.InputJsonValue | undefined });
     // A new barcode needs a new image; a removed one drops it
     const imageKey = product.barcode ? `/barcodes/${encodeURIComponent(product.barcode)}.png` : null;
@@ -510,6 +598,12 @@ export class ProductsController {
   @Get('scan/:code')
   scan(@Param('code') code: string, @BranchId() branchId: string | null) {
     return this.products.findByCode(code, branchId);
+  }
+
+  /** Every batch with its source and what happened to it (?all=true includes batches with nothing left) */
+  @Get(':id/batches')
+  batches(@Param('id') id: string, @Query() q: { all?: string }, @BranchId() branchId: string | null) {
+    return this.products.batchDetails(id, q, branchId);
   }
 
   @Get(':id')

@@ -4,6 +4,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { branchCache } from '../common/cache.js';
 import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
 import { normalizeGstin } from '../common/gst.js';
+import { staffBranches } from '../common/auth.guard.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
 class CreateBranchDto {
@@ -54,18 +55,21 @@ export class BranchesService {
     });
   }
 
-  /** Branches this user may switch between (staff: only their own) */
+  /** Branches this user may switch between: staff only their own (one = locked; several = no "All branches") */
   async mine(user: AuthUser) {
     const all = await this.prisma.branch.findMany({
       where: { isActive: true },
       select: { id: true, code: true, name: true, city: true },
       orderBy: { name: 'asc' },
     });
-    const locked = !!user.branchId && user.role !== 'ADMIN';
+    const allowed = staffBranches(user);
+    const branches = allowed ? all.filter((b) => allowed.includes(b.id)) : all;
     return {
-      locked,
-      homeBranchId: user.branchId,
-      branches: locked ? all.filter((b) => b.id === user.branchId) : all,
+      locked: !!allowed && branches.length <= 1,
+      /** Limited to some branches: "All branches" isn't offered */
+      restricted: !!allowed,
+      homeBranchId: user.branchId && branches.some((b) => b.id === user.branchId) ? user.branchId : (branches[0]?.id ?? null),
+      branches,
     };
   }
 

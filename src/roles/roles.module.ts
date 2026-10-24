@@ -17,7 +17,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { EDITABLE_ROLES, refreshUsers, rolePermissions } from '../common/access.js';
 import { Can, CurrentUser, type AuthUser } from '../common/decorators.js';
 import { defaultsFor, isPermission, normalizePermissions, type Permission } from '../common/permissions.js';
-import { Role } from '../generated/prisma/enums.js';
+import { Role, RoleLevel } from '../generated/prisma/enums.js';
 import { userCache } from '../common/cache.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 
@@ -28,6 +28,8 @@ class RoleTemplateDto {
   @IsString() @MinLength(1, { message: 'Choose the department this role belongs to' }) departmentId: string;
   /** Built-in role that supplies the authority limits (never ADMIN) */
   @IsEnum(Role) baseRole: Role;
+  /** Seniority within the department; L1 when not given */
+  @IsOptional() @IsEnum(RoleLevel) level?: RoleLevel;
   @IsArray() @IsString({ each: true }) permissions: string[];
   /** Ignored: a role's users always follow it (keeping their own extras / removals) */
   @IsOptional() @IsBoolean() applyToUsers?: boolean;
@@ -45,6 +47,13 @@ class DepartmentDto {
 const BUILT_IN = new Set(['ADMIN', 'MANAGER', 'CASHIER', 'ACCOUNTANT', 'ADMINISTRATOR', 'OWNER']);
 
 /** Shape a role row for the API: flat department fields and the number of users holding it */
+/** Level a role starts at from its name: administrators L3, managers and heads L2, everyone else L1 */
+export function levelFromName(name: string): RoleLevel {
+  if (/\badmin(istrator)?\b/i.test(name)) return 'L3';
+  if (/\b(manager|head)\b/i.test(name)) return 'L2';
+  return 'L1';
+}
+
 function shapeRole<T extends { _count: { users: number }; department: { id: string; name: string } | null }>({ _count, ...t }: T) {
   return { ...t, userCount: _count.users };
 }
@@ -100,10 +109,10 @@ export class RolesService {
     }
     const departmentId = await this.departmentOf(dto.departmentId);
     const row = await this.prisma.roleTemplate.create({
-      data: { name, description: dto.description?.trim() || null, departmentId, baseRole: dto.baseRole, permissions },
+      data: { name, description: dto.description?.trim() || null, departmentId, baseRole: dto.baseRole, level: dto.level ?? levelFromName(name), permissions },
       include: ROLE_INCLUDE,
     });
-    await this.audit.log(by.id, 'CREATE', 'RoleTemplate', row.id, { name, department: row.department?.name ?? null, baseRole: dto.baseRole, permissions });
+    await this.audit.log(by.id, 'CREATE', 'RoleTemplate', row.id, { name, department: row.department?.name ?? null, baseRole: dto.baseRole, level: row.level, permissions });
     return shapeRole(row);
   }
 
@@ -116,7 +125,7 @@ export class RolesService {
     const row = await this.prisma.$transaction(async (tx) => {
       const r = await tx.roleTemplate.update({
         where: { id },
-        data: { name, description: dto.description?.trim() || null, departmentId, baseRole: dto.baseRole, permissions },
+        data: { name, description: dto.description?.trim() || null, departmentId, baseRole: dto.baseRole, level: dto.level, permissions },
         include: ROLE_INCLUDE,
       });
       // Everyone holding the role follows it exactly
@@ -125,7 +134,7 @@ export class RolesService {
       return r;
     }, TX_OPTIONS);
     await userCache.clear();
-    await this.audit.log(by.id, 'UPDATE', 'RoleTemplate', id, { name, department: row.department?.name ?? null, baseRole: dto.baseRole, permissions });
+    await this.audit.log(by.id, 'UPDATE', 'RoleTemplate', id, { name, department: row.department?.name ?? null, baseRole: dto.baseRole, level: row.level, permissions });
     return shapeRole(row);
   }
 

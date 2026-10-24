@@ -40,6 +40,7 @@ import { isInterState, ourGstPlace, splitGst, stateCodeOf, GST_STATES } from '..
 import { hasPerm } from '../common/permissions.js';
 import {
   docDate,
+  financialYear,
   nextDocNo,
   num,
   paged,
@@ -638,6 +639,14 @@ export class ProcurementService {
       canEdit: EDITABLE.includes(po.status) && receivedPct(po.items) === 0,
       items: po.items.map((i) => ({ ...i, pendingQty: pendingQty(i) })),
     };
+  }
+
+  /** The number the next new PO will get, read without using it up (shown on the New PO form) */
+  async nextPoNo() {
+    const settings = await this.prisma.storeSettings.findUnique({ where: { id: 1 }, select: { poPrefix: true } });
+    const key = `${settings?.poPrefix ?? 'PO'}/${financialYear(new Date())}`;
+    const seq = await this.prisma.sequence.findUnique({ where: { key } });
+    return { poNo: `${key}/${String((seq?.value ?? 0) + 1).padStart(5, '0')}` };
   }
 
   gstPlace(vendorId: string, branchId: string | null, vendorBranchId?: string | null) {
@@ -2194,6 +2203,13 @@ export class PurchaseOrdersController {
   @Get('approvals/count')
   approvalCount(@CurrentUser() user: AuthUser) {
     return this.svc.myApprovalCount(user);
+  }
+
+  /** The next PO number, for the New PO form (it is only taken when the PO is saved). Declared before :id */
+  @Get('next-number')
+  @Can('po.create', 'po.edit')
+  nextNumber() {
+    return this.svc.nextPoNo();
   }
 
   /** For the PO form: whether this vendor + delivery branch is billed CGST + SGST or IGST */

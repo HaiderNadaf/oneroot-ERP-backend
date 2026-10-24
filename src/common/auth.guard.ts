@@ -12,6 +12,13 @@ import { branchCache, userCache } from './cache.js';
 import { ADMIN_ONLY_KEY, IS_PUBLIC_KEY, PERMS_KEY } from './decorators.js';
 import { hasPerm, type Permission } from './permissions.js';
 
+/** The branches a user is limited to, or null when they may work in all (administrators, or no branch ticked) */
+export function staffBranches(user: { role: string; branchId: string | null; branchIds?: string[] | null }): string[] | null {
+  if (user.role === 'ADMIN') return null;
+  const ids = user.branchIds?.length ? user.branchIds : user.branchId ? [user.branchId] : [];
+  return ids.length ? ids : null;
+}
+
 @Injectable()
 export class AuthGuard implements CanActivate {
   constructor(
@@ -39,15 +46,18 @@ export class AuthGuard implements CanActivate {
     const user = await userCache.getOrLoad(payload.sub, () =>
       this.prisma.user.findUnique({
         where: { id: payload.sub },
-        select: { id: true, email: true, name: true, role: true, permissions: true, isActive: true, branchId: true, roleTemplate: { select: { name: true } } },
+        select: { id: true, email: true, name: true, role: true, permissions: true, isActive: true, branchId: true, branchIds: true, roleTemplate: { select: { name: true } } },
       }),
     );
     if (!user || !user.isActive) throw new UnauthorizedException('Account disabled');
     req.user = user;
 
-    // Staff are locked to their home branch; others use the branch picked in the top bar
-    if (user.branchId && user.role !== 'ADMIN') {
-      req.branchId = user.branchId;
+    // Staff work only in their branches: the one picked in the top bar if it is theirs, else their home branch.
+    // "All branches" is only for users with no branch limit (and administrators).
+    const allowed = staffBranches(user);
+    if (allowed) {
+      const wanted = String(req.headers['x-branch-id'] ?? '').trim();
+      req.branchId = allowed.includes(wanted) ? wanted : (user.branchId && allowed.includes(user.branchId) ? user.branchId : allowed[0]);
     } else {
       const wanted = String(req.headers['x-branch-id'] ?? '').trim();
       if (wanted && wanted !== 'all') {

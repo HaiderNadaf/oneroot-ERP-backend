@@ -274,6 +274,89 @@ export class PaymentsService {
     }, TX_OPTIONS);
   }
 
+  /**
+   * Money still owed to vendors, two ways:
+   *  - open approved POs (approved / partly received): PO total less what was paid on its invoices
+   *  - received goods (every GRN): its invoice total, or the value of the goods passed when not invoiced yet, less what was paid
+   * Payments are only made against invoices, so "paid" always comes from the invoices linked to the PO / GRN.
+   */
+  async vendorPending(branchId: string | null = null) {
+    const live = { status: 'COMPLETED' as const };
+    const [pos, grns] = await Promise.all([
+      this.prisma.purchaseOrder.findMany({
+        where: { branchId: branchId ?? undefined, deletedAt: null, status: { in: ['APPROVED', 'PARTIALLY_RECEIVED'] } },
+        select: {
+          id: true,
+          poNo: true,
+          status: true,
+          orderDate: true,
+          totalAmount: true,
+          vendor: { select: { id: true, name: true } },
+          purchases: { where: live, select: { paidAmount: true } },
+        },
+        orderBy: { orderDate: 'asc' },
+      }),
+      this.prisma.grn.findMany({
+        where: { branchId: branchId ?? undefined },
+        select: {
+          id: true,
+          grnNo: true,
+          receivedAt: true,
+          po: { select: { id: true, poNo: true } },
+          vendor: { select: { id: true, name: true } },
+          purchase: { select: { id: true, purchaseNo: true, status: true, dueDate: true, totalAmount: true, paidAmount: true } },
+          items: { select: { passedQty: true, rate: true, poItem: { select: { discountPct: true, gstRate: true } } } },
+        },
+        orderBy: { receivedAt: 'asc' },
+      }),
+    ]);
+
+    const poRows = pos
+      .map((po) => {
+        const total = num(po.totalAmount);
+        const paid = round2(po.purchases.reduce((s, p) => s + num(p.paidAmount), 0));
+        return { id: po.id, poNo: po.poNo, status: po.status, orderDate: po.orderDate, vendor: po.vendor, total, paid, pending: round2(total - paid) };
+      })
+      .filter((r) => r.pending > 0.005);
+
+    const grnRows = grns
+      .map((g) => {
+        const invoice = g.purchase && g.purchase.status === 'COMPLETED' ? g.purchase : null;
+        // Not invoiced yet: what passed, at the PO rate after discount, with GST
+        const goods = g.items.reduce(
+          (s, i) => s + num(i.passedQty) * num(i.rate) * (1 - num(i.poItem.discountPct) / 100) * (1 + num(i.poItem.gstRate) / 100),
+          0,
+        );
+        const value = round2(invoice ? num(invoice.totalAmount) : goods);
+        const paid = round2(invoice ? num(invoice.paidAmount) : 0);
+        return {
+          id: g.id,
+          grnNo: g.grnNo,
+          receivedAt: g.receivedAt,
+          po: g.po,
+          vendor: g.vendor,
+          invoice: invoice && { id: invoice.id, purchaseNo: invoice.purchaseNo, dueDate: invoice.dueDate },
+          value,
+          paid,
+          pending: round2(value - paid),
+        };
+      })
+      .filter((r) => r.pending > 0.005);
+
+    const sum = <T,>(rows: T[], k: (r: T) => number) => round2(rows.reduce((s, r) => s + k(r), 0));
+    return {
+      po: { count: poRows.length, total: sum(poRows, (r) => r.total), paid: sum(poRows, (r) => r.paid), pending: sum(poRows, (r) => r.pending), rows: poRows },
+      grn: {
+        count: grnRows.length,
+        value: sum(grnRows, (r) => r.value),
+        paid: sum(grnRows, (r) => r.paid),
+        pending: sum(grnRows, (r) => r.pending),
+        notInvoiced: sum(grnRows, (r) => (r.invoice ? 0 : r.pending)),
+        rows: grnRows,
+      },
+    };
+  }
+
   async list(
     q: Paging & { direction?: string; partyId?: string; mode?: string; from?: string; to?: string },
     branchId: string | null = null,
@@ -314,6 +397,11 @@ export class PaymentsController {
   @Get()
   list(@Query() q: Record<string, string>, @BranchId() branchId: string | null) {
     return this.payments.list(q, branchId);
+  }
+
+  @Get('vendor-pending')
+  vendorPending(@BranchId() branchId: string | null) {
+    return this.payments.vendorPending(branchId);
   }
 
   @Post()

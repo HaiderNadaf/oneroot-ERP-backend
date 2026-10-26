@@ -123,7 +123,10 @@ export class QuotationsService {
 
   /** Line and header figures, worked out exactly like a sale bill (GST-inclusive rates, flat discount spread over lines) */
   private async compute(tx: Prisma.TransactionClient, dto: SaveQuotationDto, branchId: string | null) {
-    const products = await tx.product.findMany({ where: { id: { in: dto.items.map((i) => i.productId) } } });
+    const products = await tx.product.findMany({
+      where: { id: { in: dto.items.map((i) => i.productId) } },
+      include: { category: { select: { taxType: { select: { hsnCode: true } } } } },
+    });
     const byId = new Map(products.map((p) => [p.id, p]));
     const lines = dto.items.map((i) => {
       const product = byId.get(i.productId);
@@ -185,7 +188,7 @@ export class QuotationsService {
     const items = computed.map((l, idx) => ({
       productId: l.product.id,
       productName: l.product.name,
-      hsnCode: l.product.hsnCode,
+      hsnCode: l.product.hsnCode || l.product.category?.taxType?.hsnCode || null,
       unit: l.product.unit,
       quantity: l.quantity,
       rate: l.rate,

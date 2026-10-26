@@ -241,15 +241,22 @@ export class SalesService {
     };
   }
 
-  get(id: string) {
-    return this.prisma.sale.findUniqueOrThrow({
+  async get(id: string) {
+    const sale = await this.prisma.sale.findUniqueOrThrow({
       where: { id },
       include: {
         customer: true,
         items: {
           include: {
             product: {
-              select: { sku: true, technicalName: true, packSize: true, isSubsidised: true },
+              select: {
+                sku: true,
+                technicalName: true,
+                packSize: true,
+                isSubsidised: true,
+                hsnCode: true,
+                category: { select: { taxType: { select: { hsnCode: true } } } },
+              },
             },
             scheme: { select: { name: true, type: true, claimable: true } },
             serials: { select: { serialNo: true }, orderBy: { serialNo: 'asc' } },
@@ -261,6 +268,11 @@ export class SalesService {
         agent: { select: SALE_AGENT },
       },
     });
+    // Bills saved before the HSN fallback: take it from the product / its category's tax type
+    return {
+      ...sale,
+      items: sale.items.map((i) => ({ ...i, hsnCode: i.hsnCode || i.product.hsnCode || i.product.category?.taxType?.hsnCode || null })),
+    };
   }
 
   async create(dto: CreateSaleDto, user: AuthUser, branchId: string) {
@@ -278,6 +290,7 @@ export class SalesService {
 
       const products = await tx.product.findMany({
         where: { id: { in: dto.items.map((i) => i.productId) } },
+        include: { category: { select: { taxType: { select: { hsnCode: true } } } } },
       });
       const byId = new Map(products.map((p) => [p.id, p]));
 
@@ -583,7 +596,8 @@ export class SalesService {
             batchNo: l.alloc.batchNo,
             expiryDate: l.alloc.expiryDate,
             productName: l.product.name,
-            hsnCode: l.product.hsnCode,
+            // Most products carry no HSN of their own; their category's tax type has it
+            hsnCode: l.product.hsnCode || l.product.category?.taxType?.hsnCode || null,
             unit: l.product.unit,
             quantity: l.alloc.quantity,
             rate: l.rate,

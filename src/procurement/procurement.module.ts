@@ -1942,7 +1942,8 @@ export class ProcurementService {
       await opts.inTx?.(tx, grn.id);
       // Everything checked: undo it all
       if (opts.dryRun) throw DRY_RUN;
-      return { grn: { ...grn, shortNoteNo }, sms: { phone: po.vendor.phone, text } };
+      // The two draft notes this GRN raised (short supply; goods not accepted), for the receiver's confirmation
+      return { grn: { ...grn, shortNoteNo, issueNoteNo: dnNo }, sms: { phone: po.vendor.phone, text } };
     }, LONG_TX_OPTIONS);
     // Sent after commit; never throws, so an SMS failure can't undo the GRN
     this.sms.notify(sms.phone, sms.text, `GRN ${grn.grnNo} SMS`);

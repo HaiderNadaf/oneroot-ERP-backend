@@ -273,7 +273,7 @@ export class VanService {
         const allocs = await this.stock.allocate(tx, s.productId, s.shortQty, trip.branchId);
         for (const a of allocs) {
           await this.stock.remove(tx, a.batchId, a.quantity, 'ADJUSTMENT_OUT', { refType: 'VAN', refId: trip.id, refNo: trip.tripNo, note: `Van shortage: ${dto.note}`, userId: user.id });
-          await this.posting.postStockAdjustment(tx, { type: 'ADJUSTMENT_OUT', productName: s.name, quantity: a.quantity, unitCost: a.costPrice, reason: `Van trip ${trip.tripNo} shortage`, date: new Date(), branchId: trip.branchId, userId: user.id, refId: trip.id });
+          await this.posting.postStockAdjustment(tx, { type: 'ADJUSTMENT_OUT', productId: s.productId, productName: s.name, quantity: a.quantity, unitCost: a.costPrice, reason: `Van trip ${trip.tripNo} shortage`, date: new Date(), branchId: trip.branchId, userId: user.id, refId: trip.id });
         }
       }
       for (const l of lines) {

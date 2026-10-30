@@ -27,19 +27,19 @@ export interface TallyLedger {
   opening: number;
 }
 
-const esc = (s: string | null | undefined) =>
+export const esc = (s: string | null | undefined) =>
   (s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
-const ymd = (d: Date) => {
+export const ymd = (d: Date) => {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}${m}${day}`;
 };
 
-const amt = (n: number) => n.toFixed(2);
+export const amt = (n: number) => n.toFixed(2);
 
-function envelope(report: 'All Masters' | 'Vouchers', body: string, company?: string) {
+export function envelope(report: 'All Masters' | 'Vouchers', body: string, company?: string) {
   const sv = company ? `<STATICVARIABLES><SVCURRENTCOMPANY>${esc(company)}</SVCURRENTCOMPANY></STATICVARIABLES>` : '';
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n<ENVELOPE>\n<HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>\n<BODY><IMPORTDATA>\n` +

@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { runAtStartup } from '../common/db-errors.js';
 import { TtlCache } from '../common/cache.js';
 import { isInterState, ourGstPlace } from '../common/gst.js';
@@ -6,6 +6,7 @@ import { nextDocNo, num, round2 } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import type { AccountType, PartyType, PaymentMode } from '../generated/prisma/enums.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { TallyQueue } from '../tally-sync/tally-queue.js';
 
 type Db = PrismaService | Prisma.TransactionClient;
 
@@ -64,6 +65,8 @@ export interface PostInput {
   reversesId?: string | null;
   isManual?: boolean;
   lines: LineInput[];
+  /** Facts the Tally voucher needs beyond the ledger lines (stock adjustment: productId, quantity) */
+  tallyMeta?: Prisma.InputJsonValue;
 }
 
 /** Which asset account money moves through for a payment mode */
@@ -80,7 +83,10 @@ export class PostingService implements OnApplicationBootstrap {
   private readonly logger = new Logger(PostingService.name);
   private readonly idCache = new TtlCache<string, Record<string, string>>('account-ids', 10 * 60_000);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tally: TallyQueue,
+  ) {}
 
   onApplicationBootstrap() {
     runAtStartup(this.logger, 'Chart of accounts setup', () => this.ensureChart());
@@ -133,7 +139,7 @@ export class PostingService implements OnApplicationBootstrap {
     if (diff !== 0) lines.push({ key: 'ROUND_OFF', debit: diff < 0 ? -diff : 0, credit: diff > 0 ? diff : 0, description: 'Rounding' });
     const ids = await this.ids(tx);
     const entryNo = await nextDocNo(tx, 'JV', input.date);
-    return tx.journalEntry.create({
+    const entry = await tx.journalEntry.create({
       data: {
         entryNo,
         date: input.date,
@@ -157,6 +163,8 @@ export class PostingService implements OnApplicationBootstrap {
         },
       },
     });
+    await this.tally.journal(tx, entry, input.tallyMeta);
+    return entry;
   }
 
   /** Mirror every entry of a document (cancelled sale, deleted payment…) that is not already reversed */
@@ -496,7 +504,7 @@ export class PostingService implements OnApplicationBootstrap {
 
   async postStockAdjustment(
     tx: Db,
-    input: { type: (typeof ADJUSTMENT_MOVES)[number]; productName: string; quantity: number; unitCost: number; reason?: string | null; date: Date; branchId?: string | null; userId?: string | null; refId?: string | null },
+    input: { type: (typeof ADJUSTMENT_MOVES)[number]; productId?: string; productName: string; quantity: number; unitCost: number; reason?: string | null; date: Date; branchId?: string | null; userId?: string | null; refId?: string | null },
   ) {
     const value = round2(Math.abs(input.quantity) * input.unitCost);
     if (value <= 0) return null;
@@ -509,6 +517,7 @@ export class PostingService implements OnApplicationBootstrap {
       narration: `${gain ? 'Stock added' : input.type === 'EXPIRED' ? 'Expired stock written off' : input.type === 'DAMAGED' ? 'Damaged stock written off' : 'Stock removed'}: ${input.productName} × ${Math.abs(input.quantity)}${input.reason ? ` — ${input.reason}` : ''}`,
       branchId: input.branchId,
       userId: input.userId,
+      tallyMeta: input.productId ? { productId: input.productId, quantity: Math.abs(input.quantity), direction: gain ? 'IN' : 'OUT' } : undefined,
       lines: gain
         ? [
             { key: 'INVENTORY', debit: value },
@@ -569,6 +578,14 @@ export class PostingService implements OnApplicationBootstrap {
    * Used once when accounting is switched on for an existing store, or after a data fix.
    */
   async rebuild(userId?: string) {
+    // Rebuilt entries get new ids, so Tally could no longer match later cancellations to what it already holds
+    if ((await this.tally.config()).from) {
+      throw new BadRequestException('Tally sync is on. Rebuilding the ledger would leave Tally out of step — turn the sync off first.');
+    }
+    return this.tally.withoutSync(() => this.repost(userId));
+  }
+
+  private async repost(userId?: string) {
     const p = this.prisma;
     const settings = await p.storeSettings.findUnique({ where: { id: 1 } });
     await p.journalEntry.deleteMany({ where: { isManual: false } });
@@ -626,6 +643,7 @@ export class PostingService implements OnApplicationBootstrap {
         run: () =>
           this.postStockAdjustment(p, {
             type: m.type as (typeof ADJUSTMENT_MOVES)[number],
+            productId: m.productId,
             productName: m.product.name,
             quantity: num(m.quantity),
             unitCost: num(m.unitCost),

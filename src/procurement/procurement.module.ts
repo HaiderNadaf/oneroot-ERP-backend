@@ -71,6 +71,7 @@ import { calcPurchaseItem } from '../purchases/purchases.module.js';
 import { SmsService } from '../sms/sms.service.js';
 import { ApprovalsService, type ChainStep } from './approvals.service.js';
 import { PoExpiryService } from './po-expiry.service.js';
+import { TallyQueue } from '../tally-sync/tally-queue.js';
 
 type Tx = Prisma.TransactionClient;
 /** Thrown at the end of a goods-inward dry run so its transaction rolls back */
@@ -427,6 +428,7 @@ export class ProcurementService {
     private readonly sms: SmsService,
     private readonly posting: PostingService,
     private readonly serials: SerialsService,
+    private readonly tally: TallyQueue,
   ) {}
 
   private history(
@@ -890,6 +892,8 @@ export class ProcurementService {
             level = 0;
           }
         }
+        // An approved PO going back for approval (or to draft) is withdrawn from Tally until approved again
+        if (orig.status === 'APPROVED' && status !== 'APPROVED') await this.tally.poClosed(tx, id);
         await tx.purchaseOrderItem.deleteMany({ where: { poId: id } });
         po = await tx.purchaseOrder.update({
           where: { id },
@@ -982,6 +986,7 @@ export class ProcurementService {
             where: { id },
             data: { status: 'APPROVED', level },
           });
+          await this.tally.poApproved(tx, po);
           // Advance terms: Finance pays the advance against the PO now
           const advanceDue = round2(num(po.advanceAmount) - num(po.advancePaid));
           if (po.paymentTerm !== 'AFTER_GRN' && advanceDue > 0) {
@@ -1027,6 +1032,7 @@ export class ProcurementService {
           where: { id },
           data: { status: 'REJECTED' },
         });
+        await this.tally.poClosed(tx, id);
         await this.history(
           tx,
           id,
@@ -1101,6 +1107,7 @@ export class ProcurementService {
         where: { id },
         data: { status: 'CANCELLED' },
       });
+      await this.tally.poClosed(tx, id);
       await this.history(tx, id, po.round, 'Cancelled', user);
       return { cancelled: true };
     }, TX_OPTIONS);

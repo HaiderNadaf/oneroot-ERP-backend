@@ -62,3 +62,8 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # local test build
 /dist-test
+
+# Tally agent: the real config holds the agent token
+tally-agent/tally-agent.config.json
+tally-agent/*.log*
+tally-agent/tally-agent-done.txt

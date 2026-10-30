@@ -341,42 +341,55 @@ model StockTransferItem {
 
 /// Single-row store profile used on invoices
 model StoreSettings {
-  id                  Int      @id @default(1)
-  storeName           String   @default("OneRoot Agri Inputs")
-  ownerName           String?
-  phone               String?
-  email               String?
-  address             String?
-  city                String?
-  state               String?
-  stateCode           String? // GST state code, e.g. "33" for Tamil Nadu
-  pincode             String?
-  gstin               String?
-  fertilizerLicenseNo String?
-  pesticideLicenseNo  String?
-  seedLicenseNo       String?
-  invoicePrefix       String   @default("INV")
-  purchasePrefix      String   @default("PUR")
-  poPrefix            String   @default("PO")
-  receiptPrefix       String   @default("RCT")
-  currency            String   @default("INR")
-  invoiceFooter       String?  @default("Thank you for your business!")
+  id                   Int       @id @default(1)
+  storeName            String    @default("OneRoot Agri Inputs")
+  ownerName            String?
+  phone                String?
+  email                String?
+  address              String?
+  city                 String?
+  state                String?
+  stateCode            String? // GST state code, e.g. "33" for Tamil Nadu
+  pincode              String?
+  gstin                String?
+  fertilizerLicenseNo  String?
+  pesticideLicenseNo   String?
+  seedLicenseNo        String?
+  invoicePrefix        String    @default("INV")
+  purchasePrefix       String    @default("PUR")
+  poPrefix             String    @default("PO")
+  receiptPrefix        String    @default("RCT")
+  currency             String    @default("INR")
+  invoiceFooter        String?   @default("Thank you for your business!")
   /// Terms & conditions shown at the bottom of the New Vendor form (admin edits them here)
-  vendorTerms         String?
-  expiryAlertDays     Int      @default(60)
+  vendorTerms          String?
+  expiryAlertDays      Int       @default(60)
   /// Default print layout for bills: A4 invoice or thermal receipt (80 mm / 58 mm)
-  receiptFormat       String   @default("A4")
+  receiptFormat        String    @default("A4")
   /// WhatsApp due-reminder text; {name} {amount} {store} {days} {phone} are filled in
-  reminderTemplate    String?
+  reminderTemplate     String?
   /// Days after the due date before a customer counts as overdue for reminders
-  reminderGraceDays   Int      @default(7)
+  reminderGraceDays    Int       @default(7)
   /// Send WhatsApp reminders automatically every day (needs the WhatsApp Cloud API keys on the server)
-  autoReminders       Boolean  @default(false)
+  autoReminders        Boolean   @default(false)
   /// Refuse new credit sales to customers with overdue bills (managers can override per bill)
-  blockOverdueCredit  Boolean  @default(false)
+  blockOverdueCredit   Boolean   @default(false)
   /// No billing until the cashier opens a shift with the opening float
-  requireOpenShift    Boolean  @default(false)
-  updatedAt           DateTime @updatedAt
+  requireOpenShift     Boolean   @default(false)
+  /// Tally company that receives the automatic sync, exactly as named in Tally (e.g. "ENP INPUT STORE")
+  tallyCompany         String?
+  /// Automatic Tally sync is on for documents dated on or after this day; null = off
+  tallySyncFrom        DateTime?
+  /// Last time the Tally agent on the Tally server called in
+  tallyAgentSeenAt     DateTime?
+  /// Reading Tally's vouchers back (Tally page): first day to read, when someone asked, when the agent took it,
+  /// when the result came in, and Tally's error if the read failed
+  tallyPullFrom        DateTime?
+  tallyPullRequestedAt DateTime?
+  tallyPullStartedAt   DateTime?
+  tallyPulledAt        DateTime?
+  tallyPullError       String?
+  updatedAt            DateTime  @updatedAt
 }
 
 /// Running counters for document numbers (INV-000123 etc.)
@@ -1831,4 +1844,90 @@ model PettyCashEntry {
 
   @@index([branchId, entryDate])
   @@index([type, entryDate])
+}
+
+// ───────────────────────── Tally sync ─────────────────────────
+
+enum TallySyncStatus {
+  /// Waiting for the agent on the Tally server
+  PENDING
+  /// Handed to the agent; waiting for Tally's reply
+  SENT
+  DONE
+  FAILED
+  /// Not sent: cancelled in the ERP before it reached Tally, or marked done by hand
+  SKIPPED
+}
+
+/// One document to push into Tally, in the order it happened. The XML is built when the agent collects it, from the
+/// journal entry (refType JOURNAL) or the PO, so the amounts are always the ERP's own posted figures.
+model TallySync {
+  id        Int             @id @default(autoincrement())
+  /// JOURNAL (refId = journal entry), PO (refId = purchase order), CANCEL (refId = TallySync id of the voucher to cancel)
+  source    String
+  refId     String
+  /// Document number shown in lists; for a PO, the voucher number used in Tally
+  refNo     String?
+  status    TallySyncStatus @default(PENDING)
+  /// Filled in once built: what Tally holds, so it can be cancelled later
+  vchType   String?
+  vchNo     String?
+  vchDate   DateTime?
+  attempts  Int             @default(0)
+  error     String?
+  /// Tally's reply to the last attempt
+  response  String?
+  /// Extra facts the voucher needs that the journal entry doesn't hold (stock adjustment: productId, quantity)
+  meta      Json?
+  /// Master records (ledgers, stock items, units) this voucher needed and sent along with it
+  masters   String[]        @default([])
+  createdAt DateTime        @default(now())
+  sentAt    DateTime?
+  doneAt    DateTime?
+
+  @@index([status, id])
+  @@index([source, refId])
+}
+
+/// A ledger, stock item or unit created in Tally, with the name it has there. Names are fixed once used so later
+/// vouchers always point at the same Tally record, and two ERP records never share one Tally name.
+model TallyMaster {
+  id        String   @id @default(cuid())
+  /// LEDGER, ITEM or UNIT
+  kind      String
+  /// What it stands for: ACC:<account id>, VEN:<vendor id>, CUS:<customer id>, CUS:WALKIN, FIX:PURCHASES, ITEM:<product id>, UNIT:<unit>
+  erpKey    String
+  name      String
+  /// Confirmed in Tally (created by the sync or already there)
+  done      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@unique([kind, erpKey])
+  @@unique([kind, name])
+}
+
+/// A voucher as it is in Tally (read back by the agent): everything in the company, including entries made by hand in
+/// Tally. Replaced for the period on every read.
+model TallyVoucher {
+  id        String   @id @default(cuid())
+  /// Tally's own id; the key used to replace a voucher on the next read
+  guid      String   @unique
+  masterId  Int?
+  alterId   Int?
+  date      DateTime
+  vchType   String
+  vchNo     String?
+  party     String?
+  narration String?
+  reference String?
+  /// Voucher value: the larger of its debit and credit totals
+  amount    Decimal  @db.Decimal(14, 2)
+  cancelled Boolean  @default(false)
+  optional  Boolean  @default(false)
+  /// [{ ledger, amount }] with debits positive
+  ledgers   Json     @default("[]")
+  pulledAt  DateTime @default(now())
+
+  @@index([date])
+  @@index([vchType, date])
 }

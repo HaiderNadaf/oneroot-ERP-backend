@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import type { Response } from 'express';
+import { json, type NextFunction, type Request, type Response } from 'express';
 import compression from 'compression';
 import { AppModule } from './app.module.js';
 import { isTransientDbError, lastLine } from './common/db-errors.js';
@@ -83,6 +83,10 @@ async function bootstrap() {
   // Close database connections cleanly on restart / deploy (SIGTERM)
   app.enableShutdownHooks();
   app.setGlobalPrefix('api');
+  // Tally's voucher export comes in as one request and can run to megabytes. Wrapped so the middleware isn't named
+  // "jsonParser": Nest looks for that name and would then skip its own JSON parser for every other route.
+  const bigJson = json({ limit: '50mb' });
+  app.use('/api/tally-agent/vouchers', (req: Request, res: Response, next: NextFunction) => bigJson(req, res, next));
   // Remembers which device each request came from, for the audit log
   app.use(requestContext);
   // gzip JSON responses (lists shrink 70-80%)

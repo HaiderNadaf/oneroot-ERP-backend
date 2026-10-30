@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
+import { TallySyncModule } from './tally-sync/tally-sync.module.js';
 import { AccountingModule } from './accounting/accounting.module.js';
 import { ApprovalsModule } from './approvals/approvals.module.js';
 import { AuditModule } from './audit/audit.module.js';
@@ -57,6 +58,7 @@ import { RetryReadsOnDbBlip } from './common/db-retry.interceptor.js';
     StorageModule,
     HealthModule,
     AuditModule,
+    TallySyncModule,
     AccountingModule,
     NotificationsModule,
     ApprovalsModule,

@@ -1,0 +1,6 @@
+{
+  "ErpUrl": "https://YOUR-ERP-API-ADDRESS",
+  "Token": "PASTE THE SAME VALUE AS TALLY_AGENT_TOKEN ON THE ERP SERVER",
+  "TallyUrl": "http://localhost:9000",
+  "BatchSize": 20
+}

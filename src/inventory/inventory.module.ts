@@ -208,7 +208,7 @@ export class InventoryService {
       let value = 0;
       const book = (quantity: number, unitCost: number) => {
         value += quantity * unitCost;
-        return this.posting.postStockAdjustment(tx, { type: dto.type, productName: product.name, quantity, unitCost, reason: dto.reason, date: new Date(), branchId, userId: user.id });
+        return this.posting.postStockAdjustment(tx, { type: dto.type, productId: product.id, productName: product.name, quantity, unitCost, reason: dto.reason, date: new Date(), branchId, userId: user.id });
       };
       let result;
       if (dto.type === 'ADJUSTMENT_IN') {

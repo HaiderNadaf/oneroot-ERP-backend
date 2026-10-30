@@ -4,6 +4,7 @@ import type { PurchaseOrderStatus } from '../generated/prisma/enums.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { RedisService } from '../redis/redis.module.js';
+import { TallyQueue } from '../tally-sync/tally-queue.js';
 
 /** Open POs that lapse when their validity runs out; anything with goods received (or closed) is kept */
 const EXPIRABLE: PurchaseOrderStatus[] = ['DRAFT', 'PENDING_APPROVAL', 'SENT_BACK', 'APPROVED'];
@@ -25,6 +26,7 @@ export class PoExpiryService implements OnApplicationBootstrap, OnModuleDestroy 
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly redis: RedisService,
+    private readonly tally: TallyQueue,
   ) {}
 
   onApplicationBootstrap() {
@@ -81,6 +83,7 @@ export class PoExpiryService implements OnApplicationBootstrap, OnModuleDestroy 
             data: { deletedAt: new Date() },
           });
           if (!count) return;
+          await this.tally.poClosed(tx, po.id);
           await tx.poHistory.create({
             data: { poId: po.id, round: po.round, action: 'Expired', userName: 'System', note: `Validity of ${po.expiryDays} days ended; removed from purchase orders` },
           });

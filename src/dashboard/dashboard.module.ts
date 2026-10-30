@@ -226,7 +226,7 @@ export class DashboardService implements OnApplicationBootstrap {
         : this.prisma.vendor.aggregate({ where: { balance: { gt: 0 } }, _sum: { balance: true }, _count: true }),
       this.prisma.$queryRaw<{ due: string | null }[]>`
         SELECT SUM("totalAmount" - "paidAmount") AS due FROM "Purchase"
-        WHERE status = 'COMPLETED' AND "paymentStatus" <> 'PAID' AND "dueDate" <= ${endOfDay(new Date(today.getTime() + 7 * 86_400_000))}
+        WHERE status = 'COMPLETED' AND "paymentStatus" <> 'PAID' AND COALESCE("dueDate", "purchaseDate") <= ${endOfDay(new Date(today.getTime() + 7 * 86_400_000))}
         ${andSale('"Purchase"')}`,
       this.reports.profitLoss({ from: r.from.toLocaleDateString('en-CA'), to: r.to.toLocaleDateString('en-CA') }, branchId),
       this.prisma.$queryRaw<{ month: string; sales: string; purchases: string; collected: string }[]>`
@@ -317,7 +317,14 @@ export class DashboardService implements OnApplicationBootstrap {
         },
       }),
       this.prisma.sale.aggregate({ where: curSale, _sum: { taxAmount: true } }),
-      this.prisma.purchase.aggregate({ where: curPurchase, _sum: { taxAmount: true } }),
+      // Input tax on bills less what sent debit / credit notes reversed (same as the GST report)
+      Promise.all([
+        this.prisma.purchase.aggregate({ where: curPurchase, _sum: { taxAmount: true } }),
+        this.prisma.debitNote.aggregate({
+          where: { status: 'SENT', noteDate: { gte: r.from, lte: r.to }, branchId: branchId ?? undefined, OR: [{ affectsStock: true }, { affectsBalance: true }] },
+          _sum: { taxAmount: true },
+        }),
+      ]).then(([bills, notes]) => ({ _sum: { taxAmount: round2(num(bills._sum.taxAmount) - num(notes._sum.taxAmount)) } })),
       this.prisma.$queryRaw<{ productId: string; name: string; unit: string; packSize: string | null; quantity: string; amount: string }[]>`
         SELECT si."productId", si."productName" AS name, si.unit, p."packSize",
                SUM(si.quantity - si."returnedQty") AS quantity, SUM(si.amount) AS amount
@@ -507,14 +514,16 @@ export class DashboardService implements OnApplicationBootstrap {
             take: 5,
           })
         : skip,
-      may('invoices.view')
-        ? this.prisma.purchase.findMany({
-            where: { branchId: branch, OR: [{ purchaseNo: ci }, { vendorInvoiceNo: ci }, { vendor: { name: ci } }] },
-            select: { id: true, purchaseNo: true, vendorInvoiceNo: true, totalAmount: true, purchaseDate: true, vendor: { select: { name: true } } },
-            orderBy: { purchaseDate: 'desc' },
-            take: 5,
-          })
-        : skip,
+      // The search bar's Purchase Invoices group is commented out (TopBar), so purchases aren't searched; the key stays empty
+      skip,
+      // may('invoices.view')
+      //   ? this.prisma.purchase.findMany({
+      //       where: { branchId: branch, OR: [{ purchaseNo: ci }, { vendorInvoiceNo: ci }, { vendor: { name: ci } }] },
+      //       select: { id: true, purchaseNo: true, vendorInvoiceNo: true, totalAmount: true, purchaseDate: true, vendor: { select: { name: true } } },
+      //       orderBy: { purchaseDate: 'desc' },
+      //       take: 5,
+      //     })
+      //   : skip,
       may('purchases.view')
         ? this.prisma.purchaseOrder.findMany({
             where: { branchId: branch, OR: [{ poNo: ci }, { vendor: { name: ci } }], deletedAt: null },

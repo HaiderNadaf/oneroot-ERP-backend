@@ -1,14 +1,15 @@
 import {
   BadRequestException,
-  Body,
+  // Body, // only the commented-out Purchase Entry route used it
   Controller,
   Delete,
   Get,
   Injectable,
   Module,
   Param,
-  Patch,
-  Post,
+  // Patch,
+  // Post, // only the commented-out create route used it
+
   Query,
 } from '@nestjs/common';
 import { Type } from 'class-transformer';
@@ -18,7 +19,7 @@ import {
   IsBoolean,
   IsDateString,
   IsEnum,
-  IsIn,
+  // IsIn,
   IsNumber,
   IsOptional,
   IsPositive,
@@ -29,10 +30,10 @@ import {
 } from 'class-validator';
 import { PostingService } from '../accounting/posting.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { CurrentUser, Can, type AuthUser, BranchId, needBranch } from '../common/decorators.js';
-import { dateRange, docDate, nextDocNo, parseDay, num, paged, paging, paymentStatus, round2, round3, type Paging } from '../common/utils.js';
+import { CurrentUser, Can, type AuthUser, BranchId /* , needBranch */ } from '../common/decorators.js';
+import { dateRange, docDate, nextDocNo, parseDay, num, paged, paging, /* paymentStatus, */ round2, round3, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
-import { PaymentMode, PurchaseOrderStatus } from '../generated/prisma/enums.js';
+import { PaymentMode /* , PurchaseOrderStatus */ } from '../generated/prisma/enums.js';
 import { StockService } from '../inventory/stock.service.js';
 import { PaymentsService } from '../payments/payments.module.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
@@ -286,8 +287,15 @@ export class PurchasesService {
    */
   async cancel(id: string, user: AuthUser) {
     return this.prisma.$transaction(async (tx) => {
-      const purchase = await tx.purchase.findUniqueOrThrow({ where: { id }, include: { items: true } });
+      const purchase = await tx.purchase.findUniqueOrThrow({ where: { id }, include: { items: true, grn: { include: { items: { include: { poItem: { select: { discountPct: true } } } } } } } });
       if (purchase.status === 'CANCELLED') throw new BadRequestException('Purchase is already cancelled');
+      // An invoice from goods inward moved its batches' value by its difference from the GRN rate; undo that
+      const billedOverGrn = new Map<string, number>();
+      for (const item of purchase.grn ? purchase.items : [])
+        if (item.batchId) billedOverGrn.set(item.batchId, (billedOverGrn.get(item.batchId) ?? 0) + num(item.taxableAmount));
+      for (const g of purchase.grn?.items ?? [])
+        if (g.batchId && billedOverGrn.has(g.batchId)) billedOverGrn.set(g.batchId, billedOverGrn.get(g.batchId)! - this.posting.grnValue([g]));
+      for (const [batchId, diff] of billedOverGrn) await this.stock.revalue(tx, batchId, -round2(diff));
       for (const item of purchase.grnId ? [] : purchase.items) {
         if (!item.batchId) continue;
         await this.stock.remove(tx, item.batchId, round3(num(item.quantity) + num(item.freeQty)), 'PURCHASE_RETURN', {
@@ -297,6 +305,19 @@ export class PurchasesService {
           note: 'Purchase cancelled',
           userId: user.id,
         });
+      }
+      // The part of the bill settled from the PO's advance goes back to the PO, so a re-booked bill can use it again
+      // (what was paid less payments and sent notes against this bill; never more than the PO has applied)
+      if (purchase.poId) {
+        const [paid, notes, po] = await Promise.all([
+          tx.payment.aggregate({ where: { purchaseId: id }, _sum: { amount: true } }),
+          tx.debitNote.aggregate({ where: { purchaseId: id, status: 'SENT', OR: [{ affectsStock: true }, { affectsBalance: true }] }, _sum: { totalAmount: true } }),
+          tx.purchaseOrder.findUniqueOrThrow({ where: { id: purchase.poId }, select: { advanceApplied: true } }),
+        ]);
+        const fromAdvance = round2(
+          Math.min(num(po.advanceApplied), num(purchase.paidAmount) - num(paid._sum.amount) - num(notes._sum.totalAmount)),
+        );
+        if (fromAdvance > 0) await tx.purchaseOrder.update({ where: { id: purchase.poId }, data: { advanceApplied: { decrement: fromAdvance } } });
       }
       // Any amount already paid stays on the vendor account as an advance
       await tx.vendor.update({
@@ -329,11 +350,13 @@ export class PurchasesController {
     return this.purchases.get(id);
   }
 
-  @Post()
-  @Can('invoices.create')
-  create(@Body() dto: CreatePurchaseDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
-    return this.purchases.create(dto, user, needBranch(branchId));
-  }
+  // Purchase Entry (booking a purchase without a GRN) is switched off in the app; purchase invoices are booked from a
+  // GRN instead (procurement: POST /grns/:id/invoice). PurchasesService.create is kept for when it comes back
+  // @Post()
+  // @Can('invoices.create')
+  // create(@Body() dto: CreatePurchaseDto, @CurrentUser() user: AuthUser, @BranchId() branchId: string | null) {
+  //   return this.purchases.create(dto, user, needBranch(branchId));
+  // }
 
   @Delete(':id')
   @Can('invoices.delete')

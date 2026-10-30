@@ -1,4 +1,6 @@
 import 'dotenv/config';
+// Days, months and FYs in reports are Indian calendar days, whatever zone the server runs in (TZ in .env wins)
+process.env.TZ ||= 'Asia/Kolkata';
 import {
   ArgumentsHost,
   Catch,

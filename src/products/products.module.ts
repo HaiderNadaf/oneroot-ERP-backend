@@ -325,9 +325,23 @@ export class ProductsService {
    */
   async batchDetails(id: string, q: { all?: string }, branchId: string | null = null) {
     const all = q.all === 'true' || q.all === '1';
+    return this.describeBatches({ productId: id, branchId: branchId ?? undefined, quantity: all ? undefined : { gt: 0 } });
+  }
+
+  /** One batch with the same details as batchDetails() plus its product (the dashboard's batch popup) */
+  async batchDetail(batchId: string, branchId: string | null = null) {
+    const [batch] = await this.describeBatches({ id: batchId, branchId: branchId ?? undefined });
+    if (!batch) throw new NotFoundException('Batch not found');
+    return batch;
+  }
+
+  private async describeBatches(where: Prisma.BatchWhereInput) {
     const batches = await this.prisma.batch.findMany({
-      where: { productId: id, branchId: branchId ?? undefined, quantity: all ? undefined : { gt: 0 } },
-      include: { branch: { select: { id: true, code: true, name: true } } },
+      where,
+      include: {
+        branch: { select: { id: true, code: true, name: true } },
+        product: { select: { id: true, name: true, sku: true, unit: true, type: true, location: true, salePrice: true, packSize: true } },
+      },
       orderBy: [{ expiryDate: { sort: 'asc', nulls: 'last' } }, { createdAt: 'asc' }],
     });
     const ids = batches.map((b) => b.id);
@@ -598,6 +612,13 @@ export class ProductsController {
   @Get('scan/:code')
   scan(@Param('code') code: string, @BranchId() branchId: string | null) {
     return this.products.findByCode(code, branchId);
+  }
+
+  /** One batch with its product, source and what happened to it. Declared before :id so it isn't taken for one. */
+  @Get('batches/:batchId')
+  @Can('inventory.view', ...PRODUCT_READ)
+  batch(@Param('batchId') batchId: string, @BranchId() branchId: string | null) {
+    return this.products.batchDetail(batchId, branchId);
   }
 
   /** Every batch with its source and what happened to it (?all=true includes batches with nothing left) */

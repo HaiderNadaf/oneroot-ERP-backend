@@ -100,33 +100,34 @@ export class VendorsService {
 
   async get(id: string) {
     const vendor = await this.prisma.vendor.findUniqueOrThrow({ where: { id } });
-    const [stats, recentPurchases] = await Promise.all([
+    // recentPurchases was never shown by the vendor page (its Purchases tab loads GET /purchases), so it isn't fetched
+    const [stats /* , recentPurchases */] = await Promise.all([
       this.prisma.purchase.aggregate({
         where: { vendorId: id, status: 'COMPLETED' },
         _sum: { totalAmount: true },
         _count: true,
         _max: { purchaseDate: true },
       }),
-      this.prisma.purchase.findMany({
-        where: { vendorId: id },
-        orderBy: { purchaseDate: 'desc' },
-        take: 10,
-        select: {
-          id: true,
-          purchaseNo: true,
-          vendorInvoiceNo: true,
-          purchaseDate: true,
-          totalAmount: true,
-          paidAmount: true,
-          paymentStatus: true,
-          status: true,
-        },
-      }),
+      // this.prisma.purchase.findMany({
+      //   where: { vendorId: id },
+      //   orderBy: { purchaseDate: 'desc' },
+      //   take: 10,
+      //   select: {
+      //     id: true,
+      //     purchaseNo: true,
+      //     vendorInvoiceNo: true,
+      //     purchaseDate: true,
+      //     totalAmount: true,
+      //     paidAmount: true,
+      //     paymentStatus: true,
+      //     status: true,
+      //   },
+      // }),
     ]);
     return {
       ...vendor,
       stats: { totalPurchases: stats._sum.totalAmount ?? 0, billCount: stats._count, lastPurchase: stats._max.purchaseDate },
-      recentPurchases,
+      // recentPurchases,
     };
   }
 

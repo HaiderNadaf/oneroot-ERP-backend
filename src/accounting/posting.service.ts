@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { runAtStartup } from '../common/db-errors.js';
 import { TtlCache } from '../common/cache.js';
-import { isInterState } from '../common/gst.js';
+import { isInterState, ourGstPlace } from '../common/gst.js';
 import { nextDocNo, num, round2 } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import type { AccountType, PartyType, PaymentMode } from '../generated/prisma/enums.js';
@@ -191,6 +191,24 @@ export class PostingService implements OnApplicationBootstrap {
     }
   }
 
+  /**
+   * Place of supply of a bill or note from a vendor: the PO's (worked out from the delivery branch and the vendor
+   * branch when it was saved), else the vendor against our branch's own GSTIN / state, else the store's
+   */
+  private async purchaseInterState(
+    tx: Db,
+    doc: { branchId: string | null; poId: string | null },
+    vendor: { gstin?: string | null; state?: string | null },
+    settings: { gstin?: string | null; state?: string | null; stateCode?: string | null } | null,
+  ) {
+    if (doc.poId) {
+      const po = await tx.purchaseOrder.findUnique({ where: { id: doc.poId }, select: { isInterState: true } });
+      if (po) return po.isInterState;
+    }
+    const branch = doc.branchId ? await tx.branch.findUnique({ where: { id: doc.branchId }, select: { gstin: true, state: true } }) : null;
+    return isInterState(vendor, ourGstPlace(branch, settings)) ?? false;
+  }
+
   /** CGST+SGST halves or IGST, on the debit or credit side */
   private tax(kind: 'INPUT' | 'OUTPUT', inter: boolean, amount: number, side: 'debit' | 'credit'): LineInput[] {
     const t = round2(amount);
@@ -276,7 +294,7 @@ export class PostingService implements OnApplicationBootstrap {
     settings: { gstin?: string | null; state?: string | null; stateCode?: string | null } | null,
     grnValue: number | null = null,
   ) {
-    const inter = isInterState(vendor, settings) ?? false;
+    const inter = await this.purchaseInterState(tx, purchase, vendor, settings);
     const subtotal = num(purchase.subtotal);
     const ro = num(purchase.roundOff);
     return this.post(tx, {
@@ -303,12 +321,12 @@ export class PostingService implements OnApplicationBootstrap {
     });
   }
 
-  /** Value of a GRN's accepted stock at the PO rate (what postGrn debited to Stock) */
-  grnValue(items: { passedQty: unknown; rate: unknown }[]) {
-    return round2(items.reduce((s, i) => s + num(i.passedQty) * num(i.rate), 0));
+  /** Value of a GRN's accepted stock at the PO rate after the line's discount (what postGrn debited to Stock) */
+  grnValue(items: { passedQty: unknown; rate: unknown; poItem: { discountPct: unknown } }[]) {
+    return round2(items.reduce((s, i) => s + num(i.passedQty) * num(i.rate) * (1 - num(i.poItem.discountPct) / 100), 0));
   }
 
-  async postGrn(tx: Db, grn: Prisma.GrnGetPayload<{ include: { items: true } }>, vendorName: string) {
+  async postGrn(tx: Db, grn: Prisma.GrnGetPayload<{ include: { items: { include: { poItem: { select: { discountPct: true } } } } } }>, vendorName: string) {
     const value = this.grnValue(grn.items);
     if (value <= 0) return null;
     return this.post(tx, {
@@ -443,8 +461,18 @@ export class PostingService implements OnApplicationBootstrap {
     settings: { gstin?: string | null; state?: string | null; stateCode?: string | null } | null,
   ) {
     if (!dn.affectsStock && !dn.affectsBalance) return null;
-    const inter = isInterState(vendor, settings) ?? false;
+    const inter = await this.purchaseInterState(tx, dn, vendor, settings);
     const kind = dn.noteType === 'DEBIT' ? 'Debit note' : 'Credit note';
+    // Returned goods leave Stock at what their batches cost (as the stock movements recorded it); any gap to the
+    // note's rate is a claim on the vendor, so Stock-in-hand keeps matching the stock report
+    let stockCost = num(dn.subtotal);
+    if (dn.affectsStock) {
+      const moves = await tx.stockMovement.findMany({
+        where: { refType: 'DEBIT_NOTE', refId: dn.id, type: 'PURCHASE_RETURN' },
+        select: { quantity: true, unitCost: true },
+      });
+      if (moves.length) stockCost = round2(moves.reduce((t, m) => t + Math.abs(num(m.quantity)) * num(m.unitCost), 0));
+    }
     return this.post(tx, {
       date: dn.noteDate,
       refType: 'DEBIT_NOTE',
@@ -455,7 +483,12 @@ export class PostingService implements OnApplicationBootstrap {
       userId: dn.userId,
       lines: [
         { key: 'CREDITORS', debit: num(dn.totalAmount), partyType: 'VENDOR', partyId: dn.vendorId, description: vendor.name },
-        { key: dn.affectsStock ? 'INVENTORY' : 'PURCHASE_CLAIMS', credit: num(dn.subtotal) },
+        ...(dn.affectsStock
+          ? [
+              { key: 'INVENTORY', credit: stockCost } as LineInput,
+              { key: 'PURCHASE_CLAIMS', credit: round2(num(dn.subtotal) - stockCost), description: 'Note rate vs stock cost' } as LineInput,
+            ]
+          : [{ key: 'PURCHASE_CLAIMS', credit: num(dn.subtotal) } as LineInput]),
         ...this.tax('INPUT', inter, num(dn.taxAmount), 'credit'),
       ],
     });
@@ -551,12 +584,12 @@ export class PostingService implements OnApplicationBootstrap {
     const opening = await p.stockMovement.findMany({ where: { type: 'OPENING' }, include: { product: { select: { id: true, name: true } } } });
     for (const m of opening) jobs.push({ date: m.createdAt, run: () => this.postOpeningStock(p, m.product, num(m.quantity), num(m.unitCost), m.createdAt, m.branchId, m.userId) });
 
-    const grns = await p.grn.findMany({ include: { items: true, vendor: { select: { name: true } } } });
+    const grns = await p.grn.findMany({ include: { items: { include: { poItem: { select: { discountPct: true } } } }, vendor: { select: { name: true } } } });
     for (const g of grns) jobs.push({ date: g.receivedAt, run: () => this.postGrn(p, g, g.vendor.name) });
 
     const purchases = await p.purchase.findMany({
       where: { status: 'COMPLETED' },
-      include: { items: true, vendor: true, grn: { include: { items: true } } },
+      include: { items: true, vendor: true, grn: { include: { items: { include: { poItem: { select: { discountPct: true } } } } } } },
     });
     for (const pu of purchases) {
       jobs.push({ date: pu.purchaseDate, run: () => this.postPurchase(p, pu, pu.vendor, settings, pu.grn ? this.grnValue(pu.grn.items) : null) });

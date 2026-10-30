@@ -169,7 +169,8 @@ export class NotificationsService implements OnApplicationBootstrap, OnModuleDes
           title: `${overdue.length} vendor bill${overdue.length > 1 ? 's are' : ' is'} overdue`,
           message: `₹${Math.round(total).toLocaleString('en-IN')} past due date`,
           module: 'Payables',
-          link: '/purchases?paymentStatus=UNPAID',
+          // The Purchase Invoices list is switched off in the app, so this opened a "not found" page
+          // link: '/purchases?paymentStatus=UNPAID',
           dedupeKey: `overdue-bills:${day}`,
         });
       }

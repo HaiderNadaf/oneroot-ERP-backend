@@ -17,7 +17,7 @@ import { ApprovalsService } from '../approvals/approvals.module.js';
 import { AuditService } from '../audit/audit.service.js';
 import { BranchId, CurrentUser, needBranch, Can, type AuthUser } from '../common/decorators.js';
 import { permittedWhere } from '../common/permissions.js';
-import { dateRange, docDate, nextDocNo, num, paged, paging, round2, startOfDay, type Paging } from '../common/utils.js';
+import { dateRange, docDate, nextDocNo, num, paged, paging, parseDay, round2, startOfDay, type Paging } from '../common/utils.js';
 import type { Prisma } from '../generated/prisma/client.js';
 import type { StockMovementType } from '../generated/prisma/enums.js';
 import { NotificationsService } from '../notifications/notifications.module.js';
@@ -71,7 +71,7 @@ export class InventoryService {
   async updateBatch(id: string, dto: UpdateBatchDto, user: AuthUser) {
     if (user.role !== 'ADMIN') throw new ForbiddenException('Only an administrator can edit a batch');
     const before = await this.prisma.batch.findUniqueOrThrow({ where: { id } });
-    const date = (v: string | null | undefined, old: Date | null) => (v === undefined ? old : v ? new Date(v) : null);
+    const date = (v: string | null | undefined, old: Date | null) => (v === undefined ? old : v ? parseDay(v) : null);
     const mfgDate = date(dto.mfgDate, before.mfgDate);
     const expiryDate = date(dto.expiryDate, before.expiryDate);
     if (mfgDate && expiryDate && mfgDate >= expiryDate) throw new BadRequestException('Expiry must be after the Mfg Date');

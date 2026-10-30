@@ -80,7 +80,7 @@ export class ReportsService {
   /** GSTR-1/3B style summary: output tax by rate and HSN, input tax by rate */
   async gst(q: Range, branchId: string | null = null) {
     const { from, to } = bounds(q);
-    const [outputByRate, hsn, inputByRate] = await Promise.all([
+    const [outputByRate, hsn, inputByRate, chargesInput] = await Promise.all([
       this.prisma.$queryRaw<{ gstRate: string; taxable: string; tax: string; interTax: string; count: bigint }[]>`
         SELECT si."gstRate", SUM(si."taxableAmount") AS taxable, SUM(si."taxAmount") AS tax,
                SUM(CASE WHEN s."isInterState" THEN si."taxAmount" ELSE 0 END) AS "interTax", COUNT(*) AS count
@@ -98,6 +98,11 @@ export class ReportsService {
         FROM "PurchaseItem" pi JOIN "Purchase" p ON p.id = pi."purchaseId"
         WHERE p.status = 'COMPLETED' AND p."purchaseDate" BETWEEN ${from} AND ${to} ${andBranch('p', branchId)}
         GROUP BY pi."gstRate" ORDER BY pi."gstRate"`,
+      // GST on freight / other charges: the bill's tax beyond what its item lines carry
+      this.prisma.$queryRaw<{ taxable: string | null; tax: string | null }[]>`
+        SELECT SUM(p."otherCharges") AS taxable, SUM(p."taxAmount" - it.tax) AS tax
+        FROM "Purchase" p JOIN (SELECT "purchaseId", SUM("taxAmount") AS tax FROM "PurchaseItem" GROUP BY "purchaseId") it ON it."purchaseId" = p.id
+        WHERE p.status = 'COMPLETED' AND p."purchaseDate" BETWEEN ${from} AND ${to} AND p."taxAmount" - it.tax > 0.004 ${andBranch('p', branchId)}`,
     ]);
     const output = outputByRate.map((r) => {
       const tax = num(r.tax);
@@ -111,7 +116,13 @@ export class ReportsService {
         tax,
       };
     });
-    const input = inputByRate.map((r) => ({ gstRate: num(r.gstRate), taxable: num(r.taxable), tax: num(r.tax) }));
+    const input: { gstRate: number | null; label?: string; taxable: number; tax: number }[] = inputByRate.map((r) => ({
+      gstRate: num(r.gstRate),
+      taxable: num(r.taxable),
+      tax: num(r.tax),
+    }));
+    const chargesTax = round2(num(chargesInput[0]?.tax));
+    if (chargesTax > 0) input.push({ gstRate: null, label: 'Freight & other charges', taxable: round2(num(chargesInput[0]?.taxable)), tax: chargesTax });
     // Debit/credit notes from vendors reverse part of the input tax already claimed
     const notes = await this.prisma.debitNote.aggregate({
       where: {
@@ -150,7 +161,7 @@ export class ReportsService {
 
   async profitLoss(q: Range, branchId: string | null = null) {
     const { from, to } = bounds(q);
-    const [sales, returns, returnCost, expenses] = await Promise.all([
+    const [sales, returns, returnCost, expenses, bills, claims] = await Promise.all([
       this.prisma.sale.aggregate({
         where: { status: 'COMPLETED', saleDate: { gte: from, lte: to }, branchId: branchId ?? undefined },
         _sum: { totalAmount: true, taxAmount: true, costAmount: true, discount: true },
@@ -172,6 +183,16 @@ export class ReportsService {
         where: { expenseDate: { gte: from, lte: to }, branchId: branchId ?? undefined },
         _sum: { amount: true },
       }),
+      // Purchase-side lines the ledger also books to P&L: freight on bills (direct expense) and the bill discount (income)
+      this.prisma.purchase.aggregate({
+        where: { status: 'COMPLETED', purchaseDate: { gte: from, lte: to }, branchId: branchId ?? undefined },
+        _sum: { otherCharges: true, discount: true },
+      }),
+      // Money-only debit / credit notes from vendors (no goods back) are income: Purchase Claims
+      this.prisma.debitNote.aggregate({
+        where: { status: 'SENT', affectsBalance: true, affectsStock: false, noteDate: { gte: from, lte: to }, branchId: branchId ?? undefined },
+        _sum: { subtotal: true },
+      }),
     ]);
     const categories = await this.prisma.expenseCategory.findMany();
     const catName = new Map(categories.map((c) => [c.id, c.name]));
@@ -183,10 +204,17 @@ export class ReportsService {
     const netRevenue = round2(grossSales - outputTax - (returnsAmount - returnsTax));
     const cogs = round2(num(sales._sum.costAmount) - num(returnCost[0]?.cost));
     const grossProfit = round2(netRevenue - cogs);
-    const expenseRows = expenses
-      .map((e) => ({ category: catName.get(e.categoryId) ?? 'Other', amount: num(e._sum.amount) }))
-      .sort((a, b) => b.amount - a.amount);
+    const freight = round2(num(bills._sum.otherCharges));
+    const expenseRows = [
+      ...expenses.map((e) => ({ category: catName.get(e.categoryId) ?? 'Other', amount: num(e._sum.amount) })),
+      ...(freight > 0 ? [{ category: 'Freight & Other Purchase Charges', amount: freight }] : []),
+    ].sort((a, b) => b.amount - a.amount);
     const totalExpenses = round2(expenseRows.reduce((s, e) => s + e.amount, 0));
+    const otherIncome = [
+      { label: 'Discount Received on Bills', amount: round2(num(bills._sum.discount)) },
+      { label: 'Purchase Claims (Debit / Credit Notes)', amount: round2(num(claims._sum.subtotal)) },
+    ].filter((x) => x.amount > 0);
+    const totalOtherIncome = round2(otherIncome.reduce((s, x) => s + x.amount, 0));
     return {
       from,
       to,
@@ -201,7 +229,9 @@ export class ReportsService {
       grossMarginPct: netRevenue > 0 ? round2((grossProfit / netRevenue) * 100) : 0,
       expenses: expenseRows,
       totalExpenses,
-      netProfit: round2(grossProfit - totalExpenses),
+      otherIncome,
+      totalOtherIncome,
+      netProfit: round2(grossProfit - totalExpenses + totalOtherIncome),
     };
   }
 
@@ -214,7 +244,8 @@ export class ReportsService {
              p."reorderLevel", p."salePrice",
              (SELECT SUM(b.quantity * b."costPrice") FROM "Batch" b WHERE b."productId" = p.id AND b.quantity > 0 ${andBranch('b', branchId)}) AS "costValue"
       FROM "Product" p LEFT JOIN "Category" c ON c.id = p."categoryId" LEFT JOIN "TaxType" t ON t.id = c."taxTypeId"
-      WHERE p."isActive" = true
+      -- A deactivated product still holding stock stays in, so the total matches Stock-in-hand in the books
+      WHERE p."isActive" = true OR EXISTS (SELECT 1 FROM "Batch" b WHERE b."productId" = p.id AND b.quantity <> 0)
       ORDER BY p.name`;
     const items = rows
       .filter((r) => (!q.type || r.type === q.type) && (!q.taxTypeId || r.taxTypeId === q.taxTypeId))

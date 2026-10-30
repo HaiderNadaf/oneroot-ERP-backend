@@ -22,7 +22,7 @@ import {
   IsDateString,
   IsEnum,
   IsIn,
-  IsInt,
+  // IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -46,7 +46,7 @@ import {
   paged,
   paging,
   parseDay,
-  paymentStatus,
+  // paymentStatus,
   round2,
   round3,
   startOfDay,
@@ -210,6 +210,8 @@ class BookInvoiceDto {
   items: InvoiceItemDto[];
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) discount?: number;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) otherCharges?: number;
+  /** GST on the other charges, added to the invoice's tax (the PO's freight / other charges carry their own GST) */
+  @IsOptional() @Type(() => Number) @IsNumber() @Min(0) otherChargesTax?: number;
   @IsOptional() @Type(() => Number) @IsNumber() @Min(0) paidAmount?: number;
   @IsOptional() @IsEnum(PaymentMode) paymentMode?: PaymentMode;
   @IsOptional() @IsString() paymentReference?: string;
@@ -327,6 +329,9 @@ const accounted = (i: PoItemCounts) =>
   num(i.passedQty) + num(i.rejectedQty) + num(i.damagedQty) + num(i.expiredQty);
 const pendingQty = (i: PoItemCounts) =>
   round3(Math.max(0, num(i.quantity) - accounted(i)));
+/** PO rate after the line's trade discount, excl. GST: what the vendor actually charges per unit */
+const netRate = (i: { rate: unknown; discountPct: unknown }) =>
+  round2(num(i.rate) * (1 - num(i.discountPct) / 100));
 
 export function receivedPct(items: PoItemCounts[]) {
   const ordered = items.reduce((s, i) => s + num(i.quantity), 0);
@@ -348,13 +353,16 @@ function poLines(
     const p = products.get(i.productId);
     if (!p) throw new BadRequestException(`Unknown product ${i.productId}`);
     const gstRate = num(p.gstRate);
-    const discountPct = i.discountPct ?? 0;
+    // At the precision the columns store, so the saved amounts match what the line shows later
+    const quantity = round3(i.quantity);
+    const rate = round2(i.rate);
+    const discountPct = round2(i.discountPct ?? 0);
     // Discount comes off quantity x rate; GST is charged on what is left
-    const taxable = round2(i.quantity * i.rate * (1 - discountPct / 100));
+    const taxable = round2(quantity * rate * (1 - discountPct / 100));
     return {
       productId: i.productId,
-      quantity: i.quantity,
-      rate: i.rate,
+      quantity,
+      rate,
       discountPct,
       gstRate,
       taxable,
@@ -617,7 +625,8 @@ export class ProcurementService {
         itemCount: items.length,
         receivedPct: receivedPct(items),
         canEdit: EDITABLE.includes(po.status) && receivedPct(items) === 0,
-        chain: await this.chainView(po),
+        // Neither the PO list nor the debit-note form reads the chain; getPo and the approval queue still send it
+        // chain: await this.chainView(po),
       })),
     );
     return {
@@ -717,9 +726,10 @@ export class ProcurementService {
     return { poNo: `${key}/${String((seq?.value ?? 0) + 1).padStart(5, '0')}` };
   }
 
-  gstPlace(vendorId: string, branchId: string | null, vendorBranchId?: string | null) {
-    return poGstPlace(this.prisma, vendorId, branchId, vendorBranchId);
-  }
+  // Only the gst-type route used this, and the app never calls that route (it is commented out below)
+  // gstPlace(vendorId: string, branchId: string | null, vendorBranchId?: string | null) {
+  //   return poGstPlace(this.prisma, vendorId, branchId, vendorBranchId);
+  // }
 
   async savePo(id: string | null, dto: SavePoDto, user: AuthUser, currentBranch: string | null = null) {
     return this.prisma.$transaction(async (tx) => {
@@ -848,9 +858,11 @@ export class ProcurementService {
             `A ${orig.status.toLowerCase().replace('_', ' ')} PO cannot be edited`,
           );
         }
+        // Any change to the value (charges, their GST, a product's GST rate) needs approval again, not only the items
         const changed =
           signature(orig.items) !== signature(itemRows) ||
-          orig.vendorId !== dto.vendorId;
+          orig.vendorId !== dto.vendorId ||
+          Math.abs(num(orig.totalAmount) - totalAmount) > 0.004;
         const hadApprovals = orig.level > 0 || orig.status === 'APPROVED';
         let { round, level, status, levelsNeeded } = orig;
         let approvalChain: Prisma.InputJsonValue | undefined;
@@ -1415,7 +1427,7 @@ export class ProcurementService {
     const grn = await this.prisma.grn.findUniqueOrThrow({
       where: { id },
       include: {
-        po: { select: { id: true, poNo: true, vendorId: true, vendorBranch: true } },
+        po: { select: { id: true, poNo: true, vendorId: true, vendorBranch: true, isInterState: true, transportGstRate: true } },
         vendor: true,
         receivedBy: { select: { name: true } },
         branch: { select: { id: true, code: true, name: true, address: true, city: true } },
@@ -1725,7 +1737,8 @@ export class ProcurementService {
             mfgDate: r.mfgDate ? parseDay(r.mfgDate) : undefined,
             expiryDate: expiry,
             quantity: r.passedQty,
-            unitCost: num(line.rate),
+            // What the vendor charges per unit after the line's trade discount (GST is recovered, not a cost)
+            unitCost: netRate(line),
             location: r.location ?? p.location,
             type: 'PURCHASE',
             refType: 'GRN',
@@ -1772,7 +1785,7 @@ export class ProcurementService {
           notAccepted.push({
             productId: p.id,
             quantity: notOk,
-            rate: num(line.rate),
+            rate: netRate(line),
             gstRate: num(line.gstRate),
             batchNo: batchNo || null,
             description: issueRemark ? `${label}: ${issueRemark}` : label,
@@ -1798,7 +1811,11 @@ export class ProcurementService {
       }
 
       // Accepted stock is on the books at the PO rate until the vendor's bill is booked
-      await this.posting.postGrn(tx, await tx.grn.findUniqueOrThrow({ where: { id: grn.id }, include: { items: true } }), po.vendor.name);
+      await this.posting.postGrn(
+        tx,
+        await tx.grn.findUniqueOrThrow({ where: { id: grn.id }, include: { items: { include: { poItem: { select: { discountPct: true } } } } } }),
+        po.vendor.name,
+      );
 
       // Short supply: what each open PO line was still due minus what this GRN accounted for
       const short = po.items
@@ -1812,8 +1829,9 @@ export class ProcurementService {
       let shortNoteNo: string | null = null;
       if (short.length) {
         const lines = short.map(({ line, quantity }) => {
-          const sub = round2(quantity * num(line.rate));
-          return { productId: line.productId, quantity, rate: num(line.rate), gstRate: num(line.gstRate), amount: round2(sub * (1 + num(line.gstRate) / 100)), sub };
+          const rate = netRate(line);
+          const sub = round2(quantity * rate);
+          return { productId: line.productId, quantity, rate, gstRate: num(line.gstRate), amount: round2(sub * (1 + num(line.gstRate) / 100)), sub };
         });
         const subtotal = round2(lines.reduce((s, l) => s + l.sub, 0));
         const totalAmount = round2(lines.reduce((s, l) => s + l.amount, 0));
@@ -1972,13 +1990,18 @@ export class ProcurementService {
     if (!passed.length) return null;
     if (!grn.supplierInvoiceNo) throw new BadRequestException("No supplier invoice number on this GRN");
     const firstInvoice = !grn.po.purchases.some((p) => p.status !== 'CANCELLED');
+    const { po } = grn;
     const purchase = await this.bookInvoice(
       grn.id,
       {
         vendorInvoiceNo: grn.supplierInvoiceNo,
         invoiceDate: grn.receivedAt.toISOString(),
         items: passed.map((i) => ({ grnItemId: i.id, rate: num(i.rate), discountPct: num(i.poItem.discountPct) })),
-        otherCharges: firstInvoice ? round2(num(grn.po.transportCharges) + num(grn.po.otherCharges)) : 0,
+        otherCharges: firstInvoice ? round2(num(po.transportCharges) + num(po.otherCharges)) : 0,
+        // Each charge at its own GST rate, as on the PO
+        otherChargesTax: firstInvoice
+          ? round2(chargesGst(num(po.transportCharges), num(po.transportGstRate)) + chargesGst(num(po.otherCharges), num(po.otherChargesGstRate)))
+          : 0,
         notes: `Booked automatically from ${grn.grnNo}`,
       },
       user,
@@ -2030,10 +2053,11 @@ export class ProcurementService {
         );
 
       const subtotal = round2(lines.reduce((s, l) => s + l.taxableAmount, 0));
-      const taxAmount = round2(lines.reduce((s, l) => s + l.taxAmount, 0));
+      const taxAmount = round2(lines.reduce((s, l) => s + l.taxAmount, 0) + (dto.otherChargesTax ?? 0));
       const raw =
         subtotal + taxAmount - (dto.discount ?? 0) + (dto.otherCharges ?? 0);
       const totalAmount = Math.round(raw);
+      if (totalAmount < 0) throw new BadRequestException('Bill discount is more than the invoice value');
       const rateMismatch = lines.some((l) => l.mismatch);
       const vendor = await tx.vendor.findUniqueOrThrow({
         where: { id: grn.vendorId },
@@ -2088,12 +2112,9 @@ export class ProcurementService {
       });
 
       for (const l of lines) {
-        // Stock came in at the PO rate; correct the batch cost if the bill differs
-        if (l.g.batchId && (l.mismatch || l.discountPct)) {
-          await tx.batch.update({
-            where: { id: l.g.batchId },
-            data: { costPrice: round2(l.taxableAmount / num(l.g.passedQty)) },
-          });
+        // Stock came in at the PO rate; move the batch's value by what the bill differs (the same amount the books post)
+        if (l.g.batchId) {
+          await this.stock.revalue(tx, l.g.batchId, round2(l.taxableAmount - this.posting.grnValue([l.g])));
         }
         await tx.product.update({
           where: { id: l.g.productId },
@@ -2526,18 +2547,19 @@ export class PurchaseOrdersController {
     return this.svc.nextPoNo();
   }
 
-  /** For the PO form: whether this vendor + delivery branch is billed CGST + SGST or IGST */
-  @Get('gst-type')
-  @Can('po.create', 'po.edit')
-  gstType(
-    @Query('vendorId') vendorId: string,
-    @Query('branchId') branchId: string | undefined,
-    @Query('vendorBranchId') vendorBranchId: string | undefined,
-    @BranchId() current: string | null,
-  ) {
-    if (!vendorId) throw new BadRequestException('Choose a vendor');
-    return this.svc.gstPlace(vendorId, branchId || current, vendorBranchId || null);
-  }
+  // Not called by the app: the PO form works out CGST + SGST vs IGST itself
+  // /** For the PO form: whether this vendor + delivery branch is billed CGST + SGST or IGST */
+  // @Get('gst-type')
+  // @Can('po.create', 'po.edit')
+  // gstType(
+  //   @Query('vendorId') vendorId: string,
+  //   @Query('branchId') branchId: string | undefined,
+  //   @Query('vendorBranchId') vendorBranchId: string | undefined,
+  //   @BranchId() current: string | null,
+  // ) {
+  //   if (!vendorId) throw new BadRequestException('Choose a vendor');
+  //   return this.svc.gstPlace(vendorId, branchId || current, vendorBranchId || null);
+  // }
 
   @Get(':id')
   get(@Param('id') id: string, @CurrentUser() user: AuthUser) {

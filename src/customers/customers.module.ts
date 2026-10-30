@@ -22,7 +22,7 @@ import { CurrentUser, Can, type AuthUser } from '../common/decorators.js';
 import { CUSTOMER_READ } from '../common/permissions.js';
 import { num, paged, paging, round2, type Paging } from '../common/utils.js';
 import { normalizeGstin, stateFromGstin } from '../common/gst.js';
-import type { Prisma } from '../generated/prisma/client.js';
+import { Prisma } from '../generated/prisma/client.js';
 import { PrismaService, TX_OPTIONS } from '../prisma/prisma.service.js';
 import { overdueOf } from './credit.js';
 import { RemindersModule } from './reminders.service.js';
@@ -72,6 +72,29 @@ export class CustomersService {
     private readonly posting: PostingService,
     private readonly payments: PaymentsService,
   ) {}
+
+  /**
+   * Farmers onboarded in the field app (public.cf_users, role "farmer"), searched by name, mobile or village.
+   * Read only: picking one just fills the bill's name and mobile, no customer record is made.
+   */
+  async cfFarmers(search = '') {
+    const term = search.trim();
+    const like = `%${term}%`;
+    // Numbers are mostly stored without the country code: a typed +91 / 0 prefix is dropped before matching
+    const digits = term.replace(/\D/g, '').replace(term.startsWith('+') || term.replace(/\D/g, '').length > 10 ? /^(91|0)/ : /^0/, '');
+    const rows = await this.prisma.$queryRaw<
+      { id: string; name: string | null; mobile: string | null; village: string | null; taluk: string | null; district: string | null }[]
+    >`
+      SELECT id::text, name, mobile, farm_address_village AS village, farm_address_taluk AS taluk, farm_address_district AS district
+      FROM public.cf_users
+      WHERE role = 'farmer' AND deleted_at IS NULL
+        AND (${term} = '' OR name ILIKE ${like} OR farm_address_village ILIKE ${like}
+             ${digits ? Prisma.sql`OR regexp_replace(mobile, '\\D', '', 'g') LIKE ${`%${digits}%`}` : Prisma.empty})
+      ORDER BY name
+      LIMIT 20`;
+    // The bill takes a 10-digit mobile: drop the +91 / leading 0 the field app may store
+    return rows.map((r) => ({ ...r, mobile: r.mobile ? r.mobile.replace(/\D/g, '').slice(-10) || null : null }));
+  }
 
   async list(q: Paging & { search?: string; withDues?: string; status?: string }) {
     const p = paging(q);
@@ -250,6 +273,13 @@ export class CustomersController {
   @Can(...CUSTOMER_READ)
   list(@Query() q: Record<string, string>) {
     return this.customers.list(q);
+  }
+
+  /** Farmers from the field app, to fill a POS bill (declared before :id so it isn't read as an id) */
+  @Get('cf-farmers')
+  @Can(...CUSTOMER_READ)
+  cfFarmers(@Query('search') search?: string) {
+    return this.customers.cfFarmers(search);
   }
 
   @Get(':id')

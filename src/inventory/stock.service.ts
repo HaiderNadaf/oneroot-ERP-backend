@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import type { Prisma } from '../generated/prisma/client.js';
 import type { StockMovementType } from '../generated/prisma/enums.js';
-import { round3, startOfDay } from '../common/utils.js';
+import { round2, round3, startOfDay } from '../common/utils.js';
 
 type Tx = Prisma.TransactionClient;
 
@@ -48,8 +48,17 @@ export class StockService {
   async add(tx: Tx, input: AddStockInput) {
     if (input.quantity <= 0) throw new BadRequestException('Quantity must be positive');
     const batchNo = input.batchNo?.trim() || DEFAULT_BATCH;
+    const key = { productId_branchId_batchNo: { productId: input.productId, branchId: input.branchId, batchNo } };
+    // A purchase into a lot that still holds stock (same batch no. delivered again) is costed at the weighted average,
+    // so the units already there keep their value
+    let purchaseCost = input.unitCost;
+    if (input.unitCost !== undefined && input.type === 'PURCHASE') {
+      const existing = await tx.batch.findUnique({ where: key, select: { quantity: true, costPrice: true } });
+      const held = Number(existing?.quantity ?? 0);
+      if (held > 0) purchaseCost = round2((held * Number(existing!.costPrice) + input.quantity * input.unitCost) / (held + input.quantity));
+    }
     const batch = await tx.batch.upsert({
-      where: { productId_branchId_batchNo: { productId: input.productId, branchId: input.branchId, batchNo } },
+      where: key,
       create: {
         productId: input.productId,
         branchId: input.branchId,
@@ -64,7 +73,7 @@ export class StockService {
       update: {
         quantity: { increment: input.quantity },
         ...(input.location?.trim() ? { location: input.location.trim() } : {}),
-        ...(input.unitCost !== undefined && input.type === 'PURCHASE' ? { costPrice: input.unitCost } : {}),
+        ...(purchaseCost !== undefined && input.type === 'PURCHASE' ? { costPrice: purchaseCost } : {}),
         ...(input.expiryDate ? { expiryDate: input.expiryDate } : {}),
         ...(input.mfgDate ? { mfgDate: input.mfgDate } : {}),
         ...(input.mrp ? { mrp: input.mrp } : {}),
@@ -89,6 +98,21 @@ export class StockService {
     }
     await this.record(tx, batch.productId, batchId, batch.branchId, -quantity, type, ref, Number(batch.costPrice));
     return batch;
+  }
+
+  /**
+   * Changes a batch's value by `amount` (e.g. the bill's rate differs from the GRN's), spread over what is left in it,
+   * so stock valuation moves with the books. Nothing to revalue once the batch is empty.
+   */
+  async revalue(tx: Tx, batchId: string, amount: number) {
+    if (Math.abs(amount) < 0.005) return;
+    const batch = await tx.batch.findUniqueOrThrow({ where: { id: batchId }, select: { quantity: true, costPrice: true } });
+    const held = Number(batch.quantity);
+    if (held <= 0) return;
+    await tx.batch.update({
+      where: { id: batchId },
+      data: { costPrice: Math.max(0, round2((held * Number(batch.costPrice) + amount) / held)) },
+    });
   }
 
   /** First-expiry-first-out allocation across one branch's sellable (non-expired) batches */

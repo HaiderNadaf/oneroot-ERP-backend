@@ -1,0 +1,6 @@
+{
+  "ErpUrl": "https://oneroot-erp-backend.onrender.com/api",
+  "Token": "47ba261fc20c2f76eb4874d78ca2265dc1f03e35783b3be9",
+  "TallyUrl": "http://localhost:9000",
+  "BatchSize": 20
+}
